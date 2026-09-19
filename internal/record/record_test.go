@@ -48,3 +48,53 @@ func TestToolResultErrorDetection(t *testing.T) {
 		}
 	}
 }
+
+// A compact summary and an injected skill body are user records with plain
+// text content, and both were opening turns of their own. Only what the
+// person actually typed may do that.
+func TestIsUserPromptRejectsInjectedText(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"plain prompt", `{"type":"user","message":{"role":"user","content":"run the tests"}}`, true},
+		{"compact summary", `{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,
+			"message":{"role":"user","content":"This session is being continued from a previous conversation."}}`, false},
+		{"injected skill body", `{"type":"user","isMeta":true,
+			"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /skills/x"}]}}`, false},
+		{"local command echo", `{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>"}}`, false},
+		{"tool result carrier", `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`, false},
+		{"assistant record", `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var r Record
+			if err := json.Unmarshal([]byte(c.line), &r); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := r.IsUserPrompt(); got != c.want {
+				t.Errorf("IsUserPrompt() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// Attaching a screenshot turns message.content from a string into a block
+// array. Reading only the string form made those prompts invisible, so the
+// panel kept showing the previous turn.
+func TestPromptTextReadsAttachedPrompt(t *testing.T) {
+	const line = `{"type":"user","message":{"role":"user","content":[
+		{"type":"text","text":"here is a screenshot, what is wrong?"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}`
+	var r Record
+	if err := json.Unmarshal([]byte(line), &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !r.IsUserPrompt() {
+		t.Fatal("prompt with an attachment must start a turn")
+	}
+	if got, want := r.Message.PromptText(), "here is a screenshot, what is wrong?"; got != want {
+		t.Errorf("PromptText() = %q, want %q", got, want)
+	}
+}

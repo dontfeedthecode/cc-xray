@@ -110,6 +110,16 @@ type Builder struct {
 	forkSeen map[string]bool
 	failed   map[string]bool // tool_use id -> the call errored
 	authDur  bool            // Duration came from a system/turn_duration record
+
+	// A compact_boundary lands after the previous turn has closed and before
+	// the next prompt arrives, so it is held here until there is a turn to
+	// attach it to.
+	pendingCompact *Change
+
+	// marks are changes that come from outside the request stream, such as a
+	// permission-mode switch or a compaction. rebuild replaces Rows wholesale,
+	// so they are held here and spliced back in by timestamp on every pass.
+	marks []*Change
 }
 
 type stateKey struct{ model, effort, skill string }
@@ -161,12 +171,26 @@ func (b *Builder) Add(r record.Record) {
 	case r.Type == "permission-mode":
 		// Rule 6: a snapshot, not an event. Only a differing value is a change.
 		if b.lastPM != "" && r.PermissionMode != b.lastPM && b.cur != nil {
-			b.cur.Rows = append(b.cur.Rows, Row{Change: &Change{
+			b.marks = append(b.marks, &Change{
 				Time:  b.lastStamp(),
 				Label: "MODE  " + b.lastPM + " → " + r.PermissionMode,
-			}})
+			})
+			b.rebuild()
 		}
 		b.lastPM = r.PermissionMode
+		return
+	case r.Type == "system" && r.Subtype == "compact_boundary":
+		if m := r.CompactMetadata; m != nil {
+			trigger := m.Trigger
+			if trigger == "" {
+				trigger = "compact"
+			}
+			b.pendingCompact = &Change{
+				Time: r.Time(),
+				Label: "COMPACT  " + trigger + "  " + kilo(m.PreTokens) +
+					" \u2192 " + kilo(m.PostTokens) + " ctx",
+			}
+		}
 		return
 	case r.Type == "system" && r.Subtype == "turn_duration":
 		// Rule 4: authoritative turn end and total.
@@ -256,7 +280,15 @@ func (b *Builder) Add(r record.Record) {
 }
 
 func (b *Builder) startTurn(r record.Record) {
-	b.cur = &Turn{Prompt: strings.TrimSpace(r.Message.Text()), Start: r.Time()}
+	b.cur = &Turn{Prompt: strings.TrimSpace(r.Message.PromptText()), Start: r.Time()}
+	b.marks = nil
+	if b.pendingCompact != nil {
+		// The compaction happened between turns, but it is this turn whose
+		// context it reset, so it reads as the first thing that happened.
+		b.marks = append(b.marks, b.pendingCompact)
+		b.cur.Rows = append(b.cur.Rows, Row{Change: b.pendingCompact})
+		b.pendingCompact = nil
+	}
 	b.reqs = nil
 	b.byID = map[string]*request{}
 	b.forks = nil
@@ -264,6 +296,14 @@ func (b *Builder) startTurn(r record.Record) {
 	b.authDur = false
 	b.prevKey = stateKey{}
 	b.started = true
+}
+
+// kilo abbreviates a token count for a row label: 542963 -> 542k.
+func kilo(n int) string {
+	if n < 1000 {
+		return fmt.Sprint(n)
+	}
+	return fmt.Sprintf("%dk", n/1000)
 }
 
 func (b *Builder) lastStamp() time.Time {
@@ -338,6 +378,18 @@ func (b *Builder) rebuild() {
 				break
 			}
 		}
+	}
+
+	// splice out-of-band changes back in at the point they occurred
+	for _, c := range b.marks {
+		at := len(rows)
+		for i, r := range rows {
+			if r.Action != nil && r.Action.Time.After(c.Time) {
+				at = i
+				break
+			}
+		}
+		rows = append(rows[:at:at], append([]Row{{Change: c}}, rows[at:]...)...)
 	}
 
 	// splice fork markers in at the point they were announced

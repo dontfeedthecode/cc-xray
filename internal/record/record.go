@@ -55,8 +55,9 @@ type Message struct {
 	Model      string `json:"model"`
 	StopReason string `json:"stop_reason"`
 	Usage      Usage  `json:"usage"`
-	// Content is an array for assistant messages and a bare string for user
-	// prompts, so it is decoded lazily by Blocks/Text.
+	// Content is an array for assistant messages, and for user prompts is
+	// either a bare string or an array when something is attached, so it is
+	// decoded lazily by Blocks/Text/PromptText.
 	Content json.RawMessage `json:"content"`
 }
 
@@ -68,6 +69,15 @@ type ToolUseResult struct {
 	Status      string `json:"status"` // "forked" when the skill ran as a subagent
 	Background  bool   `json:"background"`
 	AgentID     string `json:"agentId"` // -> subagents/agent-<AgentID>.jsonl
+}
+
+// CompactMetadata describes a /compact: the context it replaced and the one
+// it produced. Carried on system/compact_boundary.
+type CompactMetadata struct {
+	Trigger    string `json:"trigger"` // "manual" | "auto"
+	PreTokens  int    `json:"preTokens"`
+	PostTokens int    `json:"postTokens"`
+	DurationMs int    `json:"durationMs"`
 }
 
 type Record struct {
@@ -82,6 +92,8 @@ type Record struct {
 	PerTurnEffort    *string `json:"perTurnEffort"`
 	AttributionSkill string  `json:"attributionSkill"`
 	IsSidechain      bool    `json:"isSidechain"`
+	IsMeta           bool    `json:"isMeta"`
+	IsCompactSummary bool    `json:"isCompactSummary"`
 	SessionID        string  `json:"sessionId"`
 	Version          string  `json:"version"`
 	CWD              string  `json:"cwd"`
@@ -90,6 +102,9 @@ type Record struct {
 	// type == "system", subtype == "turn_duration"
 	DurationMs   int `json:"durationMs"`
 	MessageCount int `json:"messageCount"`
+
+	// type == "system", subtype == "compact_boundary"
+	CompactMetadata *CompactMetadata `json:"compactMetadata"`
 
 	// Decoded lazily: this field is an object on most records but a bare
 	// string on some. A typed field makes json reject the entire record.
@@ -182,12 +197,41 @@ var commandWrappers = []string{
 	"<command-name>", "<command-message>", "<command-args>",
 }
 
-// IsUserPrompt reports whether this record starts a turn.
+// PromptText returns the words the user actually typed. Content is a bare
+// string for a plain prompt but a block array whenever something is attached
+// (an image, a pasted file), so both shapes have to be read: keying only off
+// the string form made every prompt with a screenshot invisible, and the
+// panel went on showing the previous turn. A tool_result block means the
+// record is carrying results back to the model, not opening a turn.
+func (m Message) PromptText() string {
+	if s := m.Text(); s != "" {
+		return s
+	}
+	var parts []string
+	for _, b := range m.Blocks() {
+		if b.Type == "tool_result" || b.ToolUseID != "" {
+			return ""
+		}
+		if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// IsUserPrompt reports whether this record starts a turn (rule 8).
 func (r Record) IsUserPrompt() bool {
 	if r.Type != "user" {
 		return false
 	}
-	t := strings.TrimSpace(r.Message.Text())
+	// isMeta marks text Claude Code injects on the user's behalf: skill
+	// bodies, attachment notes, local command echoes. isCompactSummary marks
+	// the summary handed across a /compact — treating that as a prompt made
+	// a freshly opened panel pin the summary instead of the real turn.
+	if r.IsMeta || r.IsCompactSummary {
+		return false
+	}
+	t := strings.TrimSpace(r.Message.PromptText())
 	if t == "" {
 		return false
 	}

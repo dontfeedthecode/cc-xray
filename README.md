@@ -118,6 +118,17 @@ matter:
 Each of these produced plausible, wrong numbers before it was fixed. The test
 suite asserts the exact figures of a known turn to keep them fixed.
 
+Deciding what counts as a prompt is the other fiddly part. Claude Code writes
+a lot of text into `user` records that nobody typed — injected skill bodies,
+local command echoes, attachment notes, and the summary handed across a
+`/compact`. Those carry `isMeta` or `isCompactSummary`, and `ccxray` skips
+them. Meanwhile a prompt with an image attached is written as a block array
+rather than a bare string, so both shapes are read.
+
+A `/compact` shows up as the first row of the turn that follows it, with the
+context it dropped — it is the reason the context figure in the footer just
+collapsed.
+
 ## Development
 
 ```sh
