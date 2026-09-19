@@ -17,7 +17,7 @@ func TestBodyEmitsNoChrome(t *testing.T) {
 			t.Errorf("body contains chrome %q — it will be drawn twice", banned)
 		}
 	}
-	if !strings.Contains(body, "Bash") {
+	if !strings.Contains(body, "Run the Lighthouse desktop audit") {
 		t.Error("body lost its rows")
 	}
 }
@@ -64,4 +64,27 @@ func TestNoNarrationLines(t *testing.T) {
 	if !strings.Contains(v, "answer") {
 		t.Error("the closing answer row should remain")
 	}
+}
+
+// Bash is the assumed action. Naming it on every row crowded out the
+// description, which is the part that says what actually happened.
+func TestDefaultToolIsNotNamed(t *testing.T) {
+	o := Opts{Width: 92, Rows: 60}
+	body := stripANSI(RenderBody(load(t), NewTheme(), UnicodeGlyphs(), o))
+	if strings.Contains(body, "Bash") {
+		t.Error("Bash rows should carry the description alone")
+	}
+	// ...while anything else still announces itself.
+	if !strings.Contains(body, "Skill  lighthouse-audit") {
+		t.Error("a non-default tool must still be named")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "Run the Lighthouse desktop audit") {
+			if !strings.Contains(line, "  Run the Lighthouse") {
+				t.Errorf("description not aligned into the action column: %q", line)
+			}
+			return
+		}
+	}
+	t.Error("expected row not found")
 }

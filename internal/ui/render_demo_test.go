@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dontfeedthecode/ccxray/internal/record"
 	"github.com/dontfeedthecode/ccxray/internal/turn"
@@ -62,4 +64,55 @@ func splitLines(s string) []string {
 		out = append(out, cur)
 	}
 	return out
+}
+
+// withFork returns the fixture turn with a fork block and a failed call
+// spliced in. Neither appears in the fixture, so neither was width-checked.
+func withFork(t *testing.T) *turn.Turn {
+	t.Helper()
+	tn := load(t)
+	nested := &turn.Turn{Complete: true, Requests: 9, OutTokens: 3437,
+		PeakCtx: 49000, Duration: 71 * time.Second,
+		Rows: []turn.Row{
+			{Action: &turn.Action{Model: "sonnet-5", Effort: "high", Tool: "Bash",
+				Desc:     "Run the Lighthouse desktop audit against the staging origin",
+				Thinking: true, Out: 410, Dt: 20300 * time.Millisecond}},
+			{Action: &turn.Action{Model: "sonnet-5", Effort: "medium", Tool: "Read",
+				Desc: "report.json", Out: 747, Dt: 8500 * time.Millisecond}},
+		}}
+	extra := []turn.Row{
+		{Fork: &turn.Fork{AgentID: "a8aa6be79e2101574", Skill: "lighthouse-audit",
+			Nested: nested}},
+		{Fork: &turn.Fork{AgentID: "b1c2d3e4f5a6b7c8", Skill: "pending-skill"}},
+		{Action: &turn.Action{Model: "opus-5", Effort: "high", Tool: "Bash",
+			Desc:   "A command that failed and should be visibly marked",
+			Failed: true, Out: 12, Dt: time.Second}},
+	}
+	tn.Rows = append(append([]turn.Row{}, tn.Rows...), extra...)
+	return tn
+}
+
+func TestForkAndFailureRowsFitWidth(t *testing.T) {
+	for _, w := range []int{44, 56, 64, 72, 76, 84, 92, 120} {
+		out := Render(withFork(t), NewTheme(), UnicodeGlyphs(), Opts{Width: w, Rows: 60})
+		for i, ln := range splitLines(out) {
+			if n := visWidth(ln); n > w {
+				t.Errorf("width %d: line %d is %d cells:\n%q", w, i, n, ln)
+			}
+		}
+	}
+}
+
+// The rule that drops Bash applies inside a fork block too, or the nested
+// rows read differently from the ones around them.
+func TestForkRowsAlsoDropDefaultTool(t *testing.T) {
+	out := stripANSI(Render(withFork(t), NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 60}))
+	for _, ln := range splitLines(out) {
+		if strings.Contains(ln, "Run the Lighthouse desktop audit") && strings.Contains(ln, "Bash") {
+			t.Errorf("nested row still names Bash: %q", ln)
+		}
+	}
+	if !strings.Contains(out, "Read  report.json") {
+		t.Error("nested row lost its non-default tool name")
+	}
 }

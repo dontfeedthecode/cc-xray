@@ -6,7 +6,7 @@ import "github.com/charmbracelet/lipgloss"
 // model identity, gold is a state change, teal is live.
 type Theme struct {
 	Model, Effort, Text, Dim, Dimmer, Faint, Head, Live, Gold lipgloss.Style
-	Band, BandExit, Fail                                      lipgloss.Style
+	Band, BandExit, Fail, Tool                                lipgloss.Style
 }
 
 func NewTheme() Theme {
@@ -21,6 +21,9 @@ func NewTheme() Theme {
 		Live:   lipgloss.NewStyle().Foreground(lipgloss.Color("#48B7A8")),
 		Gold:   lipgloss.NewStyle().Foreground(lipgloss.Color("#D0A85C")),
 		Fail:   lipgloss.NewStyle().Foreground(lipgloss.Color("#D9736A")),
+		// Only tools other than the default are named, so they are worth
+		// picking out: brighter than the description they precede.
+		Tool: lipgloss.NewStyle().Foreground(lipgloss.Color("#D7DEE6")).Bold(true),
 		Band: lipgloss.NewStyle().Foreground(lipgloss.Color("#D0A85C")).
 			Background(lipgloss.Color("#2B2315")),
 		BandExit: lipgloss.NewStyle().Foreground(lipgloss.Color("#7A8798")).

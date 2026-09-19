@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/dontfeedthecode/ccxray/internal/turn"
 	"github.com/mattn/go-runewidth"
 )
@@ -213,17 +214,27 @@ func RenderBody(t *turn.Turn, th Theme, g Glyphs, o Opts) string {
 	return b.String()
 }
 
+// DefaultTool is assumed and never named on a row. Nearly every action in a
+// normal turn is a shell command, so printing "Bash" on line after line said
+// nothing and cost the description eight columns. Anything else is announced.
+const DefaultTool = "Bash"
+
 func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 	gut, gutStyle := "  ", th.Faint
 	if a.Thinking {
 		gut = g.Think + " "
 	}
-	toolStyle, descStyle := th.Text, th.Dim
+	toolStyle, descStyle := th.Tool, th.Dim
 	tool, desc := shortTool(a.Tool), a.Desc
+	if a.Tool == DefaultTool {
+		tool = ""
+	}
 
 	switch {
 	case a.Failed:
-		gut, gutStyle, toolStyle = g.Fail+" ", th.Fail, th.Fail
+		// With the tool name gone from most rows the gutter alone carried the
+		// failure, which was too quiet: tint the description too.
+		gut, gutStyle, toolStyle, descStyle = g.Fail+" ", th.Fail, th.Fail, th.Fail
 	case a.Pending:
 		tool, toolStyle = o.spinFrame(g), th.Live
 		if desc = a.Say; desc == "" {
@@ -236,8 +247,7 @@ func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 
 	row := gutStyle.Render(gut) +
 		th.Model.Render(padR(modelCell(a.Model, a.Effort), colModel)) +
-		toolStyle.Render(padR(tool, colTool)) + " " +
-		descStyle.Render(padDesc(desc, l.desc))
+		actionCell(tool, desc, toolStyle, descStyle, colTool+1+l.desc)
 	if l.showOut {
 		row += th.Dim.Render(padL(comma(a.Out), colOut))
 	}
@@ -245,6 +255,20 @@ func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 		row += th.Dimmer.Render("  " + padL(dur(a.Dt), colDt))
 	}
 	return row
+}
+
+// actionCell fills the ACTION column with an optional tool name followed by
+// the description, padded as one unit so the columns after it stay aligned
+// whether or not a name was printed.
+func actionCell(tool, desc string, toolStyle, descStyle lipgloss.Style, width int) string {
+	if tool == "" {
+		return descStyle.Render(padDesc(desc, width))
+	}
+	tw := runewidth.StringWidth(tool) + 2
+	if tw >= width {
+		return toolStyle.Render(padDesc(tool, width))
+	}
+	return toolStyle.Render(tool) + "  " + descStyle.Render(padDesc(desc, width-tw))
 }
 
 // RenderFooter draws the closing rule and the turn totals.
@@ -311,11 +335,14 @@ func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 			if a.Thinking {
 				gut = g.Think
 			}
+			tool := shortTool(a.Tool)
+			if a.Tool == DefaultTool {
+				tool = ""
+			}
 			// the nesting rail costs three cells against a top-level row
 			row := th.Faint.Render("  │"+gut) + " " +
 				th.Gold.Render(padR(modelCell(a.Model, a.Effort), colModel)) +
-				th.Text.Render(padR(shortTool(a.Tool), colTool)) + " " +
-				th.Dim.Render(padDesc(a.Desc, l.desc-3))
+				actionCell(tool, a.Desc, th.Tool, th.Dim, colTool+1+l.desc-3)
 			if l.showOut {
 				row += th.Dim.Render(padL(comma(a.Out), colOut))
 			}

@@ -8,19 +8,26 @@ each action cost in tokens and time, and — the part that is otherwise
 invisible — the moment a skill changes the model out from under you.
 
 ```
-▎ Run a lighthouse audit of http://localhost:8080/ and report any substantial issues.
+▎ Run a lighthouse audit of http://localhost:8080/ and report any substantial
+▎ issues.
 
-  MODEL             ACTION                                          OUT      Δt
-  ──────────────────────────────────────────────────────────────────────────────
-  opus-5 (high)     Skill    lighthouse-audit                       103    2.0s
+  MODEL             ACTION                                           OUT      Δt
+  ────────────────────────────────────────────────────────────────────────────
+  opus-5 (high)     Skill  lighthouse-audit  http://localhost:808…   103    2.0s
   ╭─ forked → sonnet-5  ·  lighthouse-audit  ·  agent a8aa6be7
-  │✎ sonnet-5 (high)  Bash   Run the Lighthouse desktop audit       410   20.3s
-  │  sonnet-5 (high)  Bash   Parse the report for key metrics       747    8.5s
+  │✎ sonnet-5 (high)   Run the Lighthouse desktop audit against t…   410   20.3s
+  │  sonnet-5 (medium) Read  report.json                             747    8.5s
   ╰─ returned  9 req  ·  3,437 out  ·  49k ctx  ·  1m 11s
-✎ opus-5 (high)     Bash     Compare both runs                      767    3.1s
-  ──────────────────────────────────────────────────────────────────────────────
-  turn complete   15 req  ·  63k ctx                              6,080  1m 48s
+× opus-5 (high)     A command that failed, marked and tinted          12    1.0s
+✎ opus-5 (high)     answer  I'll use the lighthouse-audit skill f… 1,512       —
+  ────────────────────────────────────────────────────────────────────────────
+  turn complete   15 req  ·  63k ctx                               6,080  1m 48s
 ```
+
+Most actions are shell commands, so `Bash` is the assumed default and goes
+unnamed — the description is the useful part and gets the space. Anything
+else announces itself: `Read`, `Grep`, `Skill`, an MCP tool. `✎` marks a row
+the model thought before, `×` marks a call that failed.
 
 It is **read-only**. It tails the transcript Claude Code already writes and
 never modifies anything.
@@ -128,6 +135,29 @@ rather than a bare string, so both shapes are read.
 A `/compact` shows up as the first row of the turn that follows it, with the
 context it dropped — it is the reason the context figure in the footer just
 collapsed.
+
+## Trying it out
+
+Watching a real turn is the point, but a real turn is whatever you happen to
+be doing. The repo ships a skill that drives a deliberately varied one, so
+you can see every kind of row at once.
+
+Open two terminal tabs in this directory. In the first:
+
+```sh
+go run ./cmd/ccxray
+```
+
+In the second, start Claude Code and ask it to run the demo:
+
+```
+/ccxray-demo
+```
+
+It works through plain shell calls, several named tools, a deliberate
+failure, and a skill that forks onto a different model — which is the one
+thing you cannot see any other way. `.claude/skills/` holds both halves; the
+`model:` line only takes effect because the probe declares `context: fork`.
 
 ## Development
 
