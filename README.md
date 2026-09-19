@@ -155,9 +155,24 @@ In the second, start Claude Code and ask it to run the demo:
 ```
 
 It works through plain shell calls, several named tools, a deliberate
-failure, and a skill that forks onto a different model — which is the one
-thing you cannot see any other way. `.claude/skills/` holds both halves; the
-`model:` line only takes effect because the probe declares `context: fork`.
+failure, and two skills that move the model and effort out from under the
+turn — which is the one thing you cannot see any other way.
+
+The skills live in `.claude/skills/` in this repo rather than in
+`~/.claude/skills`, so they arrive with a clone and there is nothing to
+install. Claude Code loads them from the working directory at startup, so
+start it **from this directory**, and restart it if you have just pulled.
+
+Two frontmatter keys matter here, and they do not behave the same way:
+
+| key | effect |
+| --- | --- |
+| `model:` | inert on its own; applies only with `context: fork` |
+| `effort:` | `low`, `medium`, `high`, `max`, or an integer |
+
+`ccxray-demo-probe` sets both and forks. `ccxray-demo-effort` sets only
+`effort:` and does not fork, which is the combination the panel is there to
+settle: watch the MODEL column and see whether it moves.
 
 ## Development
 

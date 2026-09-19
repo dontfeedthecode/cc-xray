@@ -53,14 +53,23 @@ ls /ccxray-demo-no-such-path
 The row should pick up the `×` marker and turn red. Say in one line that the
 failure was deliberate, then carry on — do not try to fix it.
 
-## 4 — a forked skill and a model change
+## 4 — a forked skill, a model change and an effort change
 
 Invoke the `ccxray-demo-probe` skill. It runs with `context: fork`, which is
-the only way a skill's frontmatter `model:` actually takes effect, so the
-panel should show a nested fork block running on a different model from this
-one.
+the only way a skill's frontmatter `model:` actually takes effect, and it
+also declares `effort: low`. The panel should show a nested fork block
+running on `sonnet-5 (low)` against whatever this thread is on — both halves
+of the MODEL column moving at once.
 
-## 5 — clean up and answer
+## 5 — effort without a fork
+
+Invoke the `ccxray-demo-effort` skill. It declares `effort: max` and does
+*not* fork, which is the one combination nobody has confirmed. Report what
+the panel shows: a `STATE` row with an `effort: … → max` detail line, or no
+change at all. Do not assume — the whole point of having the panel open is
+that you can read the answer off it.
+
+## 6 — clean up and answer
 
 ```sh
 rm -rf .ccxray-demo

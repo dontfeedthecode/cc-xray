@@ -4,6 +4,7 @@ description: The forked half of the ccxray demo. Runs a handful of read-only com
 argument-hint: ""
 context: fork
 model: claude-sonnet-5
+effort: low
 allowed-tools: Bash, Read, Grep
 ---
 
@@ -13,8 +14,10 @@ as a nested block under the `Skill` row that launched you.
 
 `context: fork` above is what makes the `model:` line take effect — without
 it the frontmatter model is inert and the fork runs on the parent's model.
-That contrast is the whole reason this skill exists, so do not remove either
-line.
+`effort: low` moves the other half of the pair, so the fork block should
+read `sonnet-5 (low)` against a parent on something else entirely. That
+contrast is the whole reason this skill exists, so do not remove those
+lines.
 
 Run these, in order, and nothing else. They are all read-only:
 
