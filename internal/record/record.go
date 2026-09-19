@@ -1,0 +1,200 @@
+// Package record models the Claude Code session transcript (JSONL).
+//
+// The format is internal to Claude Code and changes between versions, so every
+// field here is optional and nothing panics on absence. Validated against 2.1.277.
+package record
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"time"
+)
+
+// ValidatedVersion is the Claude Code version this parser was checked against.
+const ValidatedVersion = "2.1.277"
+
+// SyntheticModel marks locally-generated messages that never hit the API.
+// They carry no effort and no usage and must be skipped entirely.
+const SyntheticModel = "<synthetic>"
+
+type Usage struct {
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens"`
+	Details             struct {
+		ThinkingTokens int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
+}
+
+type Block struct {
+	Type      string          `json:"type"` // thinking | text | tool_use | tool_result
+	Name      string          `json:"name"` // tool name, when Type == tool_use
+	ID        string          `json:"id"`   // tool_use id, paired with ToolUseID
+	ToolUseID string          `json:"tool_use_id"`
+	Text      string          `json:"text"`
+	IsError   bool            `json:"is_error"`
+	Input     json.RawMessage `json:"input"`
+	Content   json.RawMessage `json:"content"`
+}
+
+// Failed reports whether a tool_result represents an error. Claude Code marks
+// these either with is_error or an inline <tool_use_error> marker.
+func (b Block) Failed() bool {
+	if b.Type != "tool_result" {
+		return false
+	}
+	if b.IsError {
+		return true
+	}
+	return bytes.Contains(b.Content, []byte("tool_use_error"))
+}
+
+type Message struct {
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
+	Usage      Usage  `json:"usage"`
+	// Content is an array for assistant messages and a bare string for user
+	// prompts, so it is decoded lazily by Blocks/Text.
+	Content json.RawMessage `json:"content"`
+}
+
+// ToolUseResult is a sidecar on the user record that carries a tool's result.
+// For a skill with `context: fork` it identifies the subagent that ran it.
+type ToolUseResult struct {
+	Success     bool   `json:"success"`
+	CommandName string `json:"commandName"`
+	Status      string `json:"status"` // "forked" when the skill ran as a subagent
+	Background  bool   `json:"background"`
+	AgentID     string `json:"agentId"` // -> subagents/agent-<AgentID>.jsonl
+}
+
+type Record struct {
+	Type             string  `json:"type"`
+	Subtype          string  `json:"subtype"`
+	UUID             string  `json:"uuid"`
+	RequestID        string  `json:"requestId"`
+	APIBlockIndex    int     `json:"apiBlockIndex"`
+	Timestamp        string  `json:"timestamp"`
+	Message          Message `json:"message"`
+	Effort           string  `json:"effort"`
+	PerTurnEffort    *string `json:"perTurnEffort"`
+	AttributionSkill string  `json:"attributionSkill"`
+	IsSidechain      bool    `json:"isSidechain"`
+	SessionID        string  `json:"sessionId"`
+	Version          string  `json:"version"`
+	CWD              string  `json:"cwd"`
+	GitBranch        string  `json:"gitBranch"`
+
+	// type == "system", subtype == "turn_duration"
+	DurationMs   int `json:"durationMs"`
+	MessageCount int `json:"messageCount"`
+
+	// Decoded lazily: this field is an object on most records but a bare
+	// string on some. A typed field makes json reject the entire record.
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+
+	// sidecar record types
+	LastPrompt     string `json:"lastPrompt"`
+	AITitle        string `json:"aiTitle"`
+	PermissionMode string `json:"permissionMode"`
+}
+
+// Blocks decodes assistant content, returning nil when it is not an array.
+func (m Message) Blocks() []Block {
+	if len(m.Content) == 0 || m.Content[0] != '[' {
+		return nil
+	}
+	var b []Block
+	if err := json.Unmarshal(m.Content, &b); err != nil {
+		return nil
+	}
+	return b
+}
+
+// Text decodes user content, returning "" when it is not a bare string.
+func (m Message) Text() string {
+	if len(m.Content) == 0 || m.Content[0] != '"' {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+func (r Record) Time() time.Time {
+	t, err := time.Parse(time.RFC3339Nano, r.Timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// Synthetic reports whether this record was generated locally. Rule 5: these
+// must never reach the aggregator or every interruption splits a segment.
+func (r Record) Synthetic() bool { return r.Message.Model == SyntheticModel }
+
+// EffortLevel applies rule 7 — perTurnEffort overrides only when non-null.
+func (r Record) EffortLevel() string {
+	if r.PerTurnEffort != nil && *r.PerTurnEffort != "" {
+		return *r.PerTurnEffort
+	}
+	return r.Effort
+}
+
+// ShortModel trims the vendor prefix: claude-opus-5 -> opus-5.
+func ShortModel(m string) string {
+	if m == "" || m == SyntheticModel {
+		return m
+	}
+	return strings.TrimPrefix(m, "claude-")
+}
+
+// Forked reports whether this record announces a forked skill, and names the
+// subagent that ran it. The linkage is exact: no timing heuristics needed.
+func (r Record) Forked() (agentID, skill string, ok bool) {
+	t, ok2 := r.Result()
+	if !ok2 || t.Status != "forked" || t.AgentID == "" {
+		return "", "", false
+	}
+	return t.AgentID, t.CommandName, true
+}
+
+// Result decodes toolUseResult when it is an object, reporting false when it
+// is a bare string or absent.
+func (r Record) Result() (ToolUseResult, bool) {
+	var t ToolUseResult
+	if len(r.ToolUseResult) == 0 || r.ToolUseResult[0] != '{' {
+		return t, false
+	}
+	if json.Unmarshal(r.ToolUseResult, &t) != nil {
+		return t, false
+	}
+	return t, true
+}
+
+// commandWrappers are local command echoes, not real user prompts (rule 8).
+var commandWrappers = []string{
+	"<local-command-caveat>", "<local-command-stdout>",
+	"<command-name>", "<command-message>", "<command-args>",
+}
+
+// IsUserPrompt reports whether this record starts a turn.
+func (r Record) IsUserPrompt() bool {
+	if r.Type != "user" {
+		return false
+	}
+	t := strings.TrimSpace(r.Message.Text())
+	if t == "" {
+		return false
+	}
+	for _, w := range commandWrappers {
+		if strings.Contains(t, w) {
+			return false
+		}
+	}
+	return true
+}
