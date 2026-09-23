@@ -2,11 +2,11 @@
 package discover
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Slug maps a working directory to its transcript folder name. Both '/' and
@@ -57,38 +57,40 @@ func Newest(dir string) (string, error) {
 // Session resolves an explicit session id to a path within dir.
 func Session(dir, id string) string { return filepath.Join(dir, id+".jsonl") }
 
-// Resolved describes where a transcript was found.
-type Resolved struct {
-	CWD     string   // the directory whose session this is
-	Dir     string   // project dir holding the transcripts
-	Path    string   // newest transcript
-	Tried   []string // project dirs checked, in order
-	Climbed bool     // true when found above the starting directory
-}
-
-// Resolve finds the session for cwd, walking up parent directories when the
-// starting one has no transcripts. Running ccxray from a subdirectory of the
-// project Claude Code is working in is the common case, so it must work.
-func Resolve(cwd string) (Resolved, error) {
-	r := Resolved{CWD: cwd}
+// Candidates lists the project dirs that may hold the session for cwd, most
+// specific first: cwd itself, then each parent up to and including $HOME.
+// Running ccxray from a subdirectory of the project Claude Code is working in
+// is the common case, so the parents must be watched too.
+func Candidates(cwd string) []string {
+	var out []string
 	dir := filepath.Clean(cwd)
 	home, _ := os.UserHomeDir()
-
 	for {
-		pd := ProjectDir(dir)
-		r.Tried = append(r.Tried, pd)
-		if p, err := Newest(pd); err == nil && p != "" {
-			r.CWD, r.Dir, r.Path = dir, pd, p
-			r.Climbed = filepath.Clean(cwd) != dir
-			return r, nil
-		}
+		out = append(out, ProjectDir(dir))
 		parent := filepath.Dir(dir)
 		// stop at the filesystem root, and never climb above $HOME
 		if parent == dir || dir == home || parent == "." {
-			return r, fmt.Errorf("no Claude Code transcripts for %s or any parent", cwd)
+			return out
 		}
 		dir = parent
 	}
+}
+
+// FirstSince returns the newest transcript written after since, checking dirs
+// in order so the most specific project wins. It returns "" for both when no
+// session has been touched yet; a dir that does not exist yet is not an error,
+// since Claude Code creates it on the first prompt in a new project.
+func FirstSince(dirs []string, since time.Time) (dir, path string) {
+	for _, d := range dirs {
+		p, err := Newest(d)
+		if err != nil || p == "" {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && fi.ModTime().After(since) {
+			return d, p
+		}
+	}
+	return "", ""
 }
 
 // SubagentDir returns the folder holding forked-skill transcripts for a

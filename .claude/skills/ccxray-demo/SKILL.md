@@ -64,10 +64,11 @@ of the MODEL column moving at once.
 ## 5 — effort without a fork
 
 Invoke the `ccxray-demo-effort` skill. It declares `effort: max` and does
-*not* fork, which is the one combination nobody has confirmed. Report what
-the panel shows: a `STATE` row with an `effort: … → max` detail line, or no
-change at all. Do not assume — the whole point of having the panel open is
-that you can read the answer off it.
+*not* fork. `effort:` only takes hold when the skill is resolved before the
+turn's first request, and this call comes many requests in, so the panel
+should show **no** change. Report what it actually shows rather than
+assuming. To see effort move, the user can run `/ccxray-demo-effort` on its
+own as the next prompt.
 
 ## 6 — clean up and answer
 

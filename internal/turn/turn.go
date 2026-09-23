@@ -46,6 +46,7 @@ type Action struct {
 	Model    string
 	Effort   string
 	Tool     string
+	ToolID   string // tool_use id, used to seat a fork under its own call
 	Desc     string
 	Thinking bool
 	Failed   bool
@@ -69,10 +70,75 @@ type Change struct {
 // once that transcript has been read.
 type Fork struct {
 	AgentID    string
+	ParentID   string // tool_use id of the Skill call that launched it
 	Skill      string
 	Background bool
 	At         time.Time
-	Nested     *Turn // nil until the fork transcript is loaded
+	Nested     *Turn   // nil until the fork transcript is loaded
+	Peers      int     // other forks running at the same time; see MarkConcurrency
+	Group      int     // forks launched in this turn, this one included
+	From, To   float64 // where this run sat in the group's span, 0..1
+}
+
+// MarkConcurrency records how many other forks overlapped each one in time.
+// Nothing in the transcript states that forks ran in parallel: several Skill
+// calls in one assistant message do, several across separate messages do not,
+// and both look identical as records. Overlapping run spans are the only
+// evidence, so they are what this measures. Call it after the Nested
+// transcripts are attached, since the spans come from them.
+func MarkConcurrency(forks []*Fork) {
+	type span struct{ start, end time.Time }
+	spans := make([]span, len(forks))
+	for i, f := range forks {
+		s := f.At
+		e := s
+		if f.Nested != nil {
+			if !f.Nested.Start.IsZero() {
+				s = f.Nested.Start
+			}
+			if !f.Nested.End.IsZero() {
+				e = f.Nested.End
+			}
+		}
+		spans[i] = span{s, e}
+	}
+	for i := range forks {
+		n := 0
+		for j := range forks {
+			// A fork still running has end == start and overlaps nothing;
+			// that reads as "unknown", which beats guessing parallelism.
+			if i != j && spans[i].start.Before(spans[j].end) &&
+				spans[j].start.Before(spans[i].end) {
+				n++
+			}
+		}
+		forks[i].Peers = n
+		forks[i].Group = len(forks)
+	}
+
+	// Position each run inside the group's whole span, so the bars the panel
+	// draws share one time axis and can be compared down the column.
+	var lo, hi time.Time
+	for _, s := range spans {
+		if s.start.IsZero() {
+			continue
+		}
+		if lo.IsZero() || s.start.Before(lo) {
+			lo = s.start
+		}
+		if hi.IsZero() || s.end.After(hi) {
+			hi = s.end
+		}
+	}
+	total := hi.Sub(lo)
+	for i := range forks {
+		forks[i].From, forks[i].To = 0, 0
+		if total <= 0 || spans[i].start.IsZero() {
+			continue
+		}
+		forks[i].From = float64(spans[i].start.Sub(lo)) / float64(total)
+		forks[i].To = float64(spans[i].end.Sub(lo)) / float64(total)
+	}
 }
 
 type Row struct {
@@ -99,17 +165,28 @@ type Turn struct {
 
 // Builder consumes records in stream order and maintains the current turn.
 type Builder struct {
-	cur      *Turn
-	reqs     []*request
-	byID     map[string]*request
-	seen     map[string]bool // uuid dedupe
-	lastPM   string
-	prevKey  stateKey
+	cur    *Turn
+	reqs   []*request
+	byID   map[string]*request
+	seen   map[string]bool // uuid dedupe
+	lastPM string
+	// entryKey is the model/effort/skill in force when this turn opened, and
+	// lastKey the state it ended on. A turn used to start from a blank slate,
+	// so a change that lands exactly on the boundary — a skill invoked as
+	// /name setting its own effort, or /effort between turns — drew nothing
+	// and the table simply began at the new value with no sign it had moved.
+	entryKey stateKey
+	lastKey  stateKey
 	started  bool
-	forks    []*Fork
-	forkSeen map[string]bool
-	failed   map[string]bool // tool_use id -> the call errored
-	authDur  bool            // Duration came from a system/turn_duration record
+	fork     bool // fork transcript: no user prompt ever opens the turn
+	// A slash command the user typed, held until we know whether it started
+	// real work. /clear and /config start none and must open no turn; a skill
+	// invoked as /name does, and used to be discarded with them.
+	pendingCmd string
+	forks      []*Fork
+	forkSeen   map[string]bool
+	failed     map[string]bool // tool_use id -> the call errored
+	authDur    bool            // Duration came from a system/turn_duration record
 
 	// A compact_boundary lands after the previous turn has closed and before
 	// the next prompt arrives, so it is held here until there is a turn to
@@ -129,6 +206,21 @@ func New() *Builder {
 		forkSeen: map[string]bool{}, failed: map[string]bool{}}
 }
 
+// NewFork returns a Builder for a forked skill's own transcript. A fork has
+// no user prompt to open a turn with: Claude Code injects the skill body as
+// an isMeta record and every later user record only carries tool results, so
+// IsUserPrompt is false for the whole file. Feeding one to New() left cur nil
+// forever and the panel sat on "waiting for the subagent transcript" even
+// after the subagent had returned. The turn is therefore opened up front and
+// its Start taken from the first record seen.
+func NewFork() *Builder {
+	b := New()
+	b.fork = true
+	b.cur = &Turn{}
+	b.started = true
+	return b
+}
+
 func (b *Builder) Turn() *Turn { return b.cur }
 
 // Forks lists the subagent skills launched in the current turn.
@@ -143,6 +235,12 @@ func (b *Builder) Add(r record.Record) {
 		b.seen[r.UUID] = true
 	}
 
+	// A fork's turn is already open, but its clock only starts at the first
+	// record actually carrying a timestamp.
+	if b.fork && b.cur.Start.IsZero() {
+		b.cur.Start = r.Time()
+	}
+
 	// A forked skill is announced on the user record carrying the tool result.
 	// Recorded before the prompt check so it is never mistaken for a new turn.
 	if id, skill, ok := r.Forked(); ok && b.cur != nil {
@@ -150,7 +248,7 @@ func (b *Builder) Add(r record.Record) {
 			b.forkSeen[id] = true
 			res, _ := r.Result()
 			b.forks = append(b.forks, &Fork{
-				AgentID: id, Skill: skill,
+				AgentID: id, ParentID: r.ForkParent(), Skill: skill,
 				Background: res.Background, At: b.lastStamp(),
 			})
 			b.rebuild()
@@ -159,8 +257,18 @@ func (b *Builder) Add(r record.Record) {
 	}
 
 	switch {
+	// Checked before IsUserPrompt: a command typed bare reaches us as an
+	// ordinary user record and would otherwise be taken for a prompt.
+	case !b.fork && r.SlashCommand() != "":
+		b.pendingCmd = r.SlashCommand()
+		return
 	case r.IsUserPrompt():
-		b.startTurn(r)
+		// A fork owns one turn for the life of its transcript; nothing in it
+		// may reset that turn and discard the rows already gathered.
+		if !b.fork {
+			b.pendingCmd = "" // a typed prompt outranks a pending command
+			b.startTurn(r)
+		}
 		return
 	case r.Type == "last-prompt" && b.cur != nil && b.cur.Prompt == "":
 		b.cur.Prompt = r.LastPrompt
@@ -178,6 +286,26 @@ func (b *Builder) Add(r record.Record) {
 			b.rebuild()
 		}
 		b.lastPM = r.PermissionMode
+		return
+	case r.Type == "system" && r.Subtype == "local_command":
+		// A slash-launched fork is announced before any assistant record, so
+		// it is itself the proof that the command started work: the turn is
+		// opened here, or the fork would land on the previous one.
+		id, skill, ok := r.ForkedLaunch()
+		if !ok || b.fork {
+			return
+		}
+		if b.pendingCmd != "" {
+			b.startCommandTurn(b.pendingCmd, r.Time())
+			b.pendingCmd = ""
+		}
+		if b.cur != nil && !b.forkSeen[id] {
+			b.forkSeen[id] = true
+			b.forks = append(b.forks, &Fork{
+				AgentID: id, Skill: skill, Background: true, At: r.Time(),
+			})
+			b.rebuild()
+		}
 		return
 	case r.Type == "system" && r.Subtype == "compact_boundary":
 		if m := r.CompactMetadata; m != nil {
@@ -223,7 +351,17 @@ func (b *Builder) Add(r record.Record) {
 	}
 
 	// Rule 5: synthetic messages never reach the aggregator.
-	if r.Synthetic() || b.cur == nil {
+	if r.Synthetic() {
+		return
+	}
+	// Assistant work following a slash command is what proves the command
+	// opened a turn, so the turn is started here rather than on the command
+	// record itself.
+	if b.pendingCmd != "" {
+		b.startCommandTurn(b.pendingCmd, r.Time())
+		b.pendingCmd = ""
+	}
+	if b.cur == nil {
 		return
 	}
 	if r.Version != "" {
@@ -294,7 +432,36 @@ func (b *Builder) startTurn(r record.Record) {
 	b.forks = nil
 	b.forkSeen = map[string]bool{}
 	b.authDur = false
-	b.prevKey = stateKey{}
+	// Model and effort are session state and carry into the next turn; a
+	// skill is scoped to the turn that invoked it. Carrying its name across
+	// made every turn after a skill open with "SKILL ENDS", reporting in the
+	// new turn something that had happened at the close of the previous one.
+	b.entryKey = b.lastKey
+	b.entryKey.skill = ""
+	b.started = true
+}
+
+// startCommandTurn opens a turn for a slash command, pinning the command
+// itself as the prompt: it is what the user typed.
+func (b *Builder) startCommandTurn(name string, at time.Time) {
+	b.cur = &Turn{Prompt: name, Start: at}
+	b.marks = nil
+	if b.pendingCompact != nil {
+		b.marks = append(b.marks, b.pendingCompact)
+		b.cur.Rows = append(b.cur.Rows, Row{Change: b.pendingCompact})
+		b.pendingCompact = nil
+	}
+	b.reqs = nil
+	b.byID = map[string]*request{}
+	b.forks = nil
+	b.forkSeen = map[string]bool{}
+	b.authDur = false
+	// Model and effort are session state and carry into the next turn; a
+	// skill is scoped to the turn that invoked it. Carrying its name across
+	// made every turn after a skill open with "SKILL ENDS", reporting in the
+	// new turn something that had happened at the close of the previous one.
+	b.entryKey = b.lastKey
+	b.entryKey.skill = ""
 	b.started = true
 }
 
@@ -326,8 +493,11 @@ func (b *Builder) rebuild() {
 	t := b.cur
 	rows := make([]Row, 0, len(b.reqs)*2)
 	out, cw, peak := 0, 0, 0
-	prev := stateKey{}
-	first := true
+	// Comparing the first request against the state the turn opened in is what
+	// makes a boundary change visible; only a turn with nothing before it
+	// starts blank.
+	prev := b.entryKey
+	first := prev == stateKey{}
 
 	for _, rq := range b.reqs {
 		// Rule 1: once per request.
@@ -360,7 +530,7 @@ func (b *Builder) rebuild() {
 			rows = append(rows, Row{Action: &Action{
 				Time: tc.At, Model: record.ShortModel(rq.Model), Effort: rq.Effort,
 				Tool: tc.Name, Desc: tc.Desc, Thinking: rq.Thinking,
-				Failed: b.failed[tc.ID], Out: rq.Out,
+				Failed: b.failed[tc.ID], Out: rq.Out, ToolID: tc.ID,
 			}})
 		}
 	}
@@ -392,18 +562,35 @@ func (b *Builder) rebuild() {
 		rows = append(rows[:at:at], append([]Row{{Change: c}}, rows[at:]...)...)
 	}
 
-	// splice fork markers in at the point they were announced
+	// Seat each fork directly under the Skill call that launched it. Placing
+	// by timestamp put them all at the bottom: a fork is announced only when
+	// its subagent finishes, so three skills launched together produced three
+	// adjacent calls followed by three adjacent blocks, and nothing on screen
+	// said which belonged to which. The tool_use id is exact, so it wins;
+	// the timestamp remains the fallback for a fork with no parent recorded.
 	for _, f := range b.forks {
-		at := len(rows)
-		for i, r := range rows {
-			if r.Action != nil && r.Action.Time.After(f.At) {
-				at = i
-				break
+		at := -1
+		if f.ParentID != "" {
+			for i, r := range rows {
+				if r.Action != nil && r.Action.ToolID == f.ParentID {
+					at = i + 1 // immediately below its own call
+					break
+				}
+			}
+		}
+		if at < 0 {
+			at = len(rows)
+			for i, r := range rows {
+				if r.Action != nil && r.Action.Time.After(f.At) {
+					at = i
+					break
+				}
 			}
 		}
 		rows = append(rows[:at:at], append([]Row{{Fork: f}}, rows[at:]...)...)
 	}
 
+	b.lastKey = prev
 	t.Rows, t.Requests, t.OutTokens, t.CacheWrite, t.PeakCtx = rows, len(b.reqs), out, cw, peak
 	if len(b.reqs) > 0 {
 		last := b.reqs[len(b.reqs)-1]

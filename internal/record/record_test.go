@@ -98,3 +98,72 @@ func TestPromptTextReadsAttachedPrompt(t *testing.T) {
 		t.Errorf("PromptText() = %q, want %q", got, want)
 	}
 }
+
+// A turn ends when the user speaks, and nothing else. A background agent
+// reporting back arrives as an ordinary user record with no isMeta flag and
+// plain string content, so it passed every other prompt test and started a
+// fresh turn in the middle of the work it was reporting on.
+func TestIsUserPromptIgnoresHarnessInjectedBlocks(t *testing.T) {
+	user := func(text string) Record {
+		b, err := json.Marshal(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Record{Type: "user", Message: Message{Content: b}}
+	}
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"real prompt", "audit the homepage please", true},
+		{"task notification", "<task-notification>\n<task-id>abc</task-id>\n</task-notification>", false},
+		{"system reminder", "<system-reminder>\nremember to do X\n</system-reminder>", false},
+		// The bug was reported by pasting a notification into a message; that
+		// is still the user speaking, so a substring match would be wrong.
+		{"user quoting a notification", "one observation,\n\n<task-notification> finished", true},
+		{"notification named in prose", "why did the <task-notification> reset it?", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := user(c.text).IsUserPrompt(); got != c.want {
+				t.Errorf("IsUserPrompt(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}
+
+// A skill invoked as /name is launched by Claude Code, not by a Skill tool
+// call, so it carries no toolUseResult. Its announcement arrives on a
+// system/local_command record instead, and reading only the tool-call form
+// left every slash-launched fork invisible.
+func TestForkedLaunchFromSlashCommand(t *testing.T) {
+	raw := `{"type":"system","subtype":"local_command",
+	  "content":"<local-command-stdout>Running in the background as @lighthouse-audit</local-command-stdout>\n<forked-skill-launch>{\"agentId\":\"a282e7de257a12292\",\"skillName\":\"lighthouse-audit\",\"description\":\"/lighthouse-audit\"}</forked-skill-launch>"}`
+	var r Record
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatal(err)
+	}
+	id, skill, ok := r.ForkedLaunch()
+	if !ok {
+		t.Fatal("slash-launched fork not recognised")
+	}
+	if id != "a282e7de257a12292" || skill != "lighthouse-audit" {
+		t.Errorf("got %q %q", id, skill)
+	}
+
+	for _, other := range []string{
+		`{"type":"system","subtype":"local_command","content":"<local-command-stdout>ok</local-command-stdout>"}`,
+		`{"type":"system","subtype":"compact_boundary","content":"x"}`,
+		// content is an object on other record types and must not break parsing
+		`{"type":"attachment","subtype":"local_command","content":{"type":"deferred_tools_delta"}}`,
+	} {
+		var o Record
+		if err := json.Unmarshal([]byte(other), &o); err != nil {
+			t.Fatalf("record rejected outright: %v  (%s)", err, other)
+		}
+		if _, _, ok := o.ForkedLaunch(); ok {
+			t.Errorf("false positive on %s", other)
+		}
+	}
+}

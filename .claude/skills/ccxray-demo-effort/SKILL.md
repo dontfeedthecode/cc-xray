@@ -1,18 +1,18 @@
 ---
 name: ccxray-demo-effort
-description: The in-thread half of the ccxray demo. Declares an effort level but does not fork, so the panel can show whether effort moves without a subagent. Use only from ccxray-demo.
+description: The in-thread half of the ccxray demo. Declares effort: max without forking. Run from ccxray-demo, or on its own as /ccxray-demo-effort to watch effort change in-thread.
 argument-hint: ""
 effort: max
 allowed-tools: Bash
 ---
 
-This skill exists to answer one question the panel beside you is the only
-way to answer: **does `effort:` in frontmatter take hold without
-`context: fork`?**
+This skill declares `effort: max` and deliberately does *not* fork, to show
+the rule for `effort:` in frontmatter: it applies in-thread, but only when the
+skill is resolved before the turn's first request.
 
-`model:` does not — that is settled, and `ccxray-demo-probe` demonstrates
-it. `effort:` is a separate key, so it may behave differently. This skill
-declares `effort: max` and deliberately does *not* fork.
+- Run as `/ccxray-demo-effort` on its own, the panel's MODEL column should
+  read `(max)` on the rows below.
+- Called from `ccxray-demo` partway through a turn, it should not change.
 
 Run these two, and nothing else:
 
@@ -24,24 +24,6 @@ git -C . rev-parse --short HEAD
 go test ./internal/record/ 2>&1 | tail -2
 ```
 
-Then look at the ccxray panel and report what the EFFORT part of the MODEL
-column says on those two rows compared with the rows above them:
-
-- If it changed, `effort:` applies in-thread and the panel should have drawn
-  a `STATE` row with an `effort: … → max` detail line under it.
-- If it did not, `effort:` shares the fork requirement with `model:`, and
-  the panel correctly shows no change.
-
-Either answer is useful. Say plainly which one you saw, and do not guess
-from the frontmatter — read the panel, or read the `effort` and
-`perTurnEffort` fields on the last few assistant records of the transcript:
-
-```sh
-tail -40 "$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" \
-  | python3 -c 'import sys,json
-for l in sys.stdin:
-    try: r=json.loads(l)
-    except: continue
-    if r.get("type")=="assistant":
-        print(r.get("effort"), r.get("perTurnEffort"), (r.get("message") or {}).get("model"))'
-```
+Then report in one sentence what effort the MODEL column shows on those two
+rows compared with the rows above them. Read it off the panel; do not infer
+it from this frontmatter.

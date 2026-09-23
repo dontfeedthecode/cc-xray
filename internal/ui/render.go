@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -211,6 +212,9 @@ func RenderBody(t *turn.Turn, th Theme, g Glyphs, o Opts) string {
 			b.WriteString(renderAction(r.Action, th, g, o, l) + "\n")
 		}
 	}
+	// The lanes read every fork in the turn, not the visible slice, so
+	// scrolling the table never changes what the timeline claims.
+	b.WriteString(renderTimeline(t, th, g, width))
 	return b.String()
 }
 
@@ -307,11 +311,11 @@ func overlayRight(line, note string, width int) string {
 // `context: fork` is the only way a skill's frontmatter model takes effect.
 func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 	var b strings.Builder
-	model, state := "…", "starting"
+	model, effort, state := "…", "", "starting"
 	if f.Nested != nil && len(f.Nested.Rows) > 0 {
 		for _, r := range f.Nested.Rows {
 			if r.Action != nil {
-				model = r.Action.Model
+				model, effort = r.Action.Model, r.Action.Effort
 				break
 			}
 		}
@@ -319,12 +323,40 @@ func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 			state = "done"
 		}
 	}
-	head := "╭─ forked → " + model + "  ·  " + f.Skill +
-		"  ·  agent " + short(f.AgentID) + " "
-	b.WriteString(th.Gold.Render("  "+padR(head, width-4)) + "\n")
 
+	// A fork runs every row on the model its frontmatter named, so repeating
+	// that model down the block is noise. The column is kept only when some
+	// row actually diverges from the header, which is the one case where the
+	// repetition carries information; dropping it per-row instead would leave
+	// the block ragged.
+	varies := false
+	if f.Nested != nil {
+		for _, r := range f.Nested.Rows {
+			if a := r.Action; a != nil && (a.Model != model || a.Effort != effort) {
+				varies = true
+				break
+			}
+		}
+	}
+
+	// The block is indented under its own Skill row and joined to it by a
+	// hook, so a reader never has to infer which call spawned which fork.
+	// A fork a slash command launched has no such row — it answers the
+	// prompt itself — so it sits at the top level and the hook, which would
+	// point at nothing, is dropped.
+	indent, lead := forkIndent, "  "+g.Hook+" "
+	if f.ParentID == "" {
+		indent, lead = colGutter, "  "
+	}
+	head := "╭─ forked → " + modelCell(model, effort) + "  ·  " + f.Skill +
+		"  ·  agent " + short(f.AgentID) + " "
+	// The hook carries the block's own colour: dimmed, it read as chrome and
+	// the eye did not join the block to the call above it.
+	b.WriteString(th.Gold.Render(lead+padR(head, width-4-indent)) + "\n")
+
+	rail := strings.Repeat(" ", indent)
 	if f.Nested == nil || len(f.Nested.Rows) == 0 {
-		b.WriteString(th.Faint.Render("  │ ") + th.Dim.Render(state+"…") + "\n")
+		b.WriteString(th.Faint.Render(rail+"│ ") + th.Dim.Render(state+"…") + "\n")
 	} else {
 		for _, r := range f.Nested.Rows {
 			a := r.Action
@@ -339,10 +371,15 @@ func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 			if a.Tool == DefaultTool {
 				tool = ""
 			}
-			// the nesting rail costs three cells against a top-level row
-			row := th.Faint.Render("  │"+gut) + " " +
-				th.Gold.Render(padR(modelCell(a.Model, a.Effort), colModel)) +
-				actionCell(tool, a.Desc, th.Tool, th.Dim, colTool+1+l.desc-3)
+			// the indent and rail cost seven cells against a top-level row
+			desc := colTool + 1 + l.desc - (indent + 3 - colGutter)
+			row := th.Faint.Render(rail+"│"+gut) + " "
+			if varies {
+				row += th.Gold.Render(padR(modelCell(a.Model, a.Effort), colModel))
+			} else {
+				desc += colModel // the model column's width goes to the action
+			}
+			row += actionCell(tool, a.Desc, th.Tool, th.Dim, desc)
 			if l.showOut {
 				row += th.Dim.Render(padL(comma(a.Out), colOut))
 			}
@@ -365,8 +402,134 @@ func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 	} else {
 		tail += "waiting for the subagent transcript "
 	}
-	b.WriteString(th.Faint.Render("  "+padR(tail, width-4)) + "\n")
+
+	b.WriteString(th.Faint.Render(rail+padR(tail, width-4-indent)) + "\n")
 	return b.String()
+}
+
+// renderTimeline draws one lane per fork beneath the table, all on a single
+// time axis. The per-block tail could only say how long a fork took, never
+// how its run sat against the others, so a fan-out that quietly ran two at a
+// time and queued the third looked identical to one that ran all three.
+func renderTimeline(t *turn.Turn, th Theme, g Glyphs, width int) string {
+	var forks []*turn.Fork
+	desc := map[string]string{}
+	for _, r := range t.Rows {
+		switch {
+		case r.Fork != nil:
+			forks = append(forks, r.Fork)
+		case r.Action != nil && r.Action.ToolID != "":
+			desc[r.Action.ToolID] = r.Action.Desc
+		}
+	}
+	// One fork has nothing to sit against, and a cramped panel needs its
+	// width for the table.
+	if len(forks) < 2 || width < 64 {
+		return ""
+	}
+
+	var lo, hi time.Time
+	done := 0
+	for _, f := range forks {
+		if f.Nested == nil || f.Nested.Start.IsZero() {
+			continue
+		}
+		done++
+		if lo.IsZero() || f.Nested.Start.Before(lo) {
+			lo = f.Nested.Start
+		}
+		if hi.IsZero() || f.Nested.End.After(hi) {
+			hi = f.Nested.End
+		}
+	}
+	if done < 2 || !hi.After(lo) {
+		return "" // nothing to scale against yet
+	}
+	span := hi.Sub(lo)
+
+	// Peak simultaneity, not "how many overlapped something": with a cap of
+	// two, a third fork starts the moment one finishes and so overlaps the
+	// one still running, which made a plain overlap count report every fork
+	// as concurrent and hid the queueing entirely.
+	peak := 0
+	for _, a := range forks {
+		if a.Nested == nil || a.Nested.Start.IsZero() {
+			continue
+		}
+		n := 0
+		for _, c := range forks {
+			if c.Nested == nil || c.Nested.Start.IsZero() {
+				continue
+			}
+			if !c.Nested.Start.After(a.Nested.Start) && c.Nested.End.After(a.Nested.Start) {
+				n++
+			}
+		}
+		peak = max(peak, n)
+	}
+
+	bar := min(max(width/3, 14), 40)
+	const idW, gap = 8, 2
+	label := width - 4 - idW - gap - bar - gap
+	if label < 10 {
+		return ""
+	}
+	lead := 2 + idW + gap + label + gap // cells before a lane's bar starts
+
+	var b strings.Builder
+	b.WriteString(th.Faint.Render("  "+strings.Repeat(g.Rule, width-4)) + "\n")
+
+	note := fmt.Sprintf("%d forks  ·  %d at once  ·  %s wall",
+		len(forks), peak, dur(span))
+	axis := padR("0s", bar-runewidth.StringWidth(dur(span))) + dur(span)
+	b.WriteString(th.Head.Render("  FORKS  ") +
+		th.Dimmer.Render(padR(note, lead-9)) +
+		th.Faint.Render(axis) + "\n")
+
+	for _, f := range forks {
+		name := desc[f.ParentID]
+		if name == "" {
+			name = f.Skill
+		}
+		lane := forkBar(f, g, bar)
+		if lane == "" {
+			lane = strings.Repeat(g.TlOff, bar)
+		}
+		b.WriteString("  " + th.Dim.Render(padR(short(f.AgentID), idW)) +
+			strings.Repeat(" ", gap) + th.Dimmer.Render(padDesc(name, label)) +
+			strings.Repeat(" ", gap) + th.Gold.Render(lane) + "\n")
+	}
+	return b.String()
+}
+
+// forkIndent is where a fork block's rail sits, far enough right of a
+// top-level row that the block plainly hangs off the Skill call above it.
+const forkIndent = 6
+
+// forkBar draws where a fork's run sat inside its group's overall span, which
+// is the only way to tell forks that genuinely ran in parallel from ones that
+// merely appear next to each other. A lone fork gets no bar: with nothing to
+// compare against it would always be full, which says nothing.
+func forkBar(f *turn.Fork, g Glyphs, cells int) string {
+	if f.Group < 2 || f.To <= f.From || cells < 2 {
+		return ""
+	}
+	lo := int(math.Round(f.From * float64(cells)))
+	hi := int(math.Round(f.To * float64(cells)))
+	lo = min(max(lo, 0), cells-1)
+	if hi <= lo {
+		hi = lo + 1 // a run too short to fill a cell still gets one
+	}
+	hi = min(hi, cells)
+	return strings.Repeat(g.TlOff, lo) + strings.Repeat(g.TlOn, hi-lo) +
+		strings.Repeat(g.TlOff, cells-hi)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func short(id string) string {

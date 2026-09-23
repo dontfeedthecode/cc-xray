@@ -22,9 +22,13 @@ type tickMsg time.Time
 type Model struct {
 	th      Theme
 	g       Glyphs
-	tl      *tail.Tailer
+	tl      *tail.Tailer // nil until a session is found
 	b       *turn.Builder
 	dir     string
+	watch   []string  // project dirs to wait on before any session is followed
+	since   time.Time // only a session written after this is picked up
+	cwd     string    // shown while waiting
+	pin     string    // --session: the only transcript ever followed
 	width   int
 	height  int
 	err     error
@@ -49,9 +53,15 @@ type forkWatch struct {
 	b  *turn.Builder
 }
 
+// Options says what to follow. With Path set, that transcript is followed
+// from the start. Without it the panel starts empty and waits for the first
+// session in Watch written after Since, so a stale run is never shown.
 type Options struct {
 	Dir   string
 	Path  string
+	Watch []string
+	Since time.Time
+	CWD   string
 	ASCII bool
 }
 
@@ -63,13 +73,41 @@ func NewModel(o Options) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	h := help.New()
+	var tl *tail.Tailer
+	if o.Path != "" {
+		tl = tail.New(o.Path)
+	}
 	return Model{
 		th: NewTheme(), g: g, dir: o.Dir,
-		tl: tail.New(o.Path), b: turn.New(),
+		watch: o.Watch, since: o.Since, cwd: o.CWD,
+		pin: pinned(o),
+		tl:  tl, b: turn.New(),
 		forks: map[string]*forkWatch{},
 		width: 92, height: 30,
 		spin: sp, help: h, keys: defaultKeys(), follow: true,
 	}
+}
+
+// pinned is the transcript to stay on when there is no project dir to
+// auto-switch within, as with --session.
+func pinned(o Options) string {
+	if o.Dir == "" {
+		return o.Path
+	}
+	return ""
+}
+
+// clear empties the panel and waits, as at launch, for the next session to be
+// written. A pinned session is kept and waited on instead.
+func (m *Model) clear() {
+	m.tl, m.b, m.err, m.bad = nil, turn.New(), nil, 0
+	m.forks = map[string]*forkWatch{}
+	m.since = time.Now()
+	if m.pin == "" {
+		m.dir = ""
+	}
+	m.follow = true
+	m.refresh()
 }
 
 func (m Model) Init() tea.Cmd { return tea.Batch(tick(), m.spin.Tick) }
@@ -98,6 +136,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.Clear):
+			m.clear()
+			return m, nil
 		case key.Matches(msg, m.keys.Bottom):
 			m.follow = true
 			m.vp.GotoBottom()
@@ -182,14 +223,42 @@ func max(a, b int) int {
 	return b
 }
 
+// sessionQuiet is how long the session being followed must go untouched
+// before a different one may replace it.
+const sessionQuiet = 20 * time.Second
+
 // poll drains any appended lines, re-detecting the session if a newer one
 // appears (a /clear or a new session in the same project).
+//
+// Switching is deliberately reluctant. "Newest" means newest mtime, and
+// another transcript in the same project can be touched while this turn is
+// still being written — a second Claude Code window, or a background agent's
+// bookkeeping — so switching on mtime alone would discard a live turn and
+// could thrash between two files. Only a session that has gone quiet is
+// abandoned, which keeps to the rule that a turn ends when the user speaks.
 func (m *Model) poll() {
+	if m.tl == nil && m.pin != "" {
+		fi, err := os.Stat(m.pin)
+		if err != nil || !fi.ModTime().After(m.since) {
+			return // cleared; waiting for the pinned session to move
+		}
+		m.tl = tail.New(m.pin)
+	}
+	if m.tl == nil {
+		dir, p := discover.FirstSince(m.watch, m.since)
+		if p == "" {
+			return // still waiting for Claude Code to start a session
+		}
+		m.dir, m.tl = dir, tail.New(p)
+	}
 	if m.dir != "" {
 		if p, err := discover.Newest(m.dir); err == nil && p != "" && p != m.tl.Path() {
-			m.tl.Reset(p)
-			m.b = turn.New()
-			m.forks = map[string]*forkWatch{}
+			fi, err := os.Stat(m.tl.Path())
+			if err != nil || time.Since(fi.ModTime()) > sessionQuiet {
+				m.tl.Reset(p)
+				m.b = turn.New()
+				m.forks = map[string]*forkWatch{}
+			}
 		}
 	}
 	lines, err := m.tl.Read()
@@ -223,7 +292,7 @@ func (m *Model) pollForks() {
 			if _, err := os.Stat(path); err != nil {
 				continue // not written yet; try again next tick
 			}
-			w = &forkWatch{tl: tail.New(path), b: turn.New()}
+			w = &forkWatch{tl: tail.New(path), b: turn.NewFork()}
 			m.forks[f.AgentID] = w
 		}
 		lines, err := w.tl.Read()
@@ -241,6 +310,7 @@ func (m *Model) pollForks() {
 		}
 		f.Nested = w.b.Turn()
 	}
+	turn.MarkConcurrency(m.b.Forks())
 }
 
 // live reports whether the turn is still running. It deliberately does NOT
@@ -253,6 +323,12 @@ func (m Model) live() bool {
 }
 
 func (m Model) View() string {
+	if m.tl == nil {
+		// the help line sits where it does once a turn is showing
+		h := max(1, m.height-1)
+		return RenderWaiting(m.th, m.g, m.width, h, m.frame, m.cwd) + "\n" +
+			m.th.Faint.Render("  "+m.help.View(m.keys))
+	}
 	if m.err != nil {
 		return m.th.Dim.Render("\n  waiting for a session transcript\u2026\n  ") +
 			m.th.Faint.Render(m.err.Error()) + "\n"

@@ -36,13 +36,19 @@ func NewTheme() Theme {
 // East-Asian Ambiguous and widen under a CJK locale.
 type Glyphs struct {
 	Bar, Rule, Think, Enter, Live, Fail string
-	Spin                                []string
+	// the fork timeline bar: open/close brackets, run and idle cells
+	TlOpen, TlClose, TlOn, TlOff string
+	// Hook joins a Skill row to the fork block it launched.
+	Hook string
+	Spin []string
 }
 
 func UnicodeGlyphs() Glyphs {
 	return Glyphs{
 		Bar: "▎", Rule: "─", Think: "✎",
 		Enter: "▸", Live: "●", Fail: "×",
+		TlOpen: "▕", TlClose: "▏", TlOn: "█", TlOff: "░",
+		Hook: "╰─▶",
 		// braille spinner: single-width, present in every programming font
 		Spin: []string{"⠋", "⠙", "⠹", "⠸", "⠼",
 			"⠴", "⠦", "⠧", "⠇", "⠏"},
@@ -52,6 +58,8 @@ func UnicodeGlyphs() Glyphs {
 func ASCIIGlyphs() Glyphs {
 	return Glyphs{
 		Bar: "|", Rule: "-", Think: "*", Enter: ">", Live: "*", Fail: "x",
+		TlOpen: "[", TlClose: "]", TlOn: "#", TlOff: ".",
+		Hook: "+->",
 		Spin: []string{"|", "/", "-", "\\"},
 	}
 }

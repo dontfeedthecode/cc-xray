@@ -45,78 +45,60 @@ func TestNewestIgnoresNonJSONL(t *testing.T) {
 	}
 }
 
-// The regression for the reported failure: running from a subdirectory of the
-// project Claude Code is working in must still find the session.
-func TestResolveClimbsToParent(t *testing.T) {
+// Running from a subdirectory of the project Claude Code is working in must
+// still find the session, so every parent is a candidate.
+func TestCandidatesClimbToHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	sub := filepath.Join(home, "work", "proj", "tool")
 
-	project := filepath.Join(home, "work", "proj")
-	sub := filepath.Join(project, "tool", "bin")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
+	got := Candidates(sub)
+	want := []string{
+		ProjectDir(sub),
+		ProjectDir(filepath.Join(home, "work", "proj")),
+		ProjectDir(filepath.Join(home, "work")),
+		ProjectDir(home),
 	}
-	pd := filepath.Join(home, ".claude", "projects", Slug(project))
-	if err := os.MkdirAll(pd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	os.WriteFile(filepath.Join(pd, "sess.jsonl"), []byte("{}\n"), 0o644)
-
-	r, err := Resolve(sub)
-	if err != nil {
-		t.Fatalf("Resolve from subdir failed: %v (tried %v)", err, r.Tried)
-	}
-	if r.CWD != project {
-		t.Errorf("resolved cwd = %q, want %q", r.CWD, project)
-	}
-	if !r.Climbed {
-		t.Error("Climbed should be true when found above the start dir")
-	}
-	if filepath.Base(r.Path) != "sess.jsonl" {
-		t.Errorf("path = %q", r.Path)
-	}
-	if len(r.Tried) < 3 {
-		t.Errorf("expected to try bin, tool, proj; got %v", r.Tried)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("Candidates =\n  %v\nwant\n  %v", got, want)
 	}
 }
 
-func TestResolveReportsWhatItTried(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sub := filepath.Join(home, "a", "b", "c")
-	os.MkdirAll(sub, 0o755)
+// The reported failure: ccxray opened on a stale session and never noticed
+// the live one. A transcript last written before launch must be ignored.
+func TestFirstSinceIgnoresSessionsFromBeforeLaunch(t *testing.T) {
+	d := t.TempDir()
+	old := filepath.Join(d, "old.jsonl")
+	os.WriteFile(old, []byte("{}\n"), 0o644)
+	os.Chtimes(old, nowMinus(3600), nowMinus(3600))
 
-	r, err := Resolve(sub)
-	if err == nil {
-		t.Fatal("expected failure with no transcripts anywhere")
+	since := nowMinus(1)
+	if dir, p := FirstSince([]string{d}, since); p != "" {
+		t.Fatalf("picked %s in %s, want nothing until a session is written", p, dir)
 	}
-	if len(r.Tried) == 0 {
-		t.Error("Tried should list the directories checked")
-	}
-	for _, d := range r.Tried {
-		if !strings.Contains(d, ".claude") {
-			t.Errorf("odd candidate %q", d)
-		}
+
+	os.WriteFile(filepath.Join(d, "live.jsonl"), []byte("{}\n"), 0o644)
+	if _, p := FirstSince([]string{d}, since); filepath.Base(p) != "live.jsonl" {
+		t.Errorf("picked %q, want live.jsonl", p)
 	}
 }
 
-// Never climb above $HOME. Asserted by the length of the walk: a parent's
-// slug is a prefix of its child's, so substring matching gives false hits.
-func TestResolveStopsAtHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	os.MkdirAll(filepath.Join(home, "x"), 0o755)
+// A project dir Claude Code has not created yet, and a stale parent, must not
+// stop the live session in a later candidate from being found.
+func TestFirstSinceSkipsMissingAndStaleDirs(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "missing")
+	stale, live := filepath.Join(root, "stale"), filepath.Join(root, "live")
+	os.MkdirAll(stale, 0o755)
+	os.MkdirAll(live, 0o755)
+	s := filepath.Join(stale, "s.jsonl")
+	os.WriteFile(s, []byte("{}\n"), 0o644)
+	os.Chtimes(s, nowMinus(3600), nowMinus(3600))
+	os.WriteFile(filepath.Join(live, "l.jsonl"), []byte("{}\n"), 0o644)
 
-	r, err := Resolve(filepath.Join(home, "x"))
-	if err == nil {
-		t.Fatal("expected failure")
-	}
-	// exactly two candidates: <home>/x then <home>, then stop
-	if len(r.Tried) != 2 {
-		t.Errorf("walk visited %d dirs, want 2 (stop at HOME): %v", len(r.Tried), r.Tried)
-	}
-	if !strings.HasSuffix(r.Tried[len(r.Tried)-1], Slug(home)) {
-		t.Errorf("last candidate %q should be HOME itself", r.Tried[len(r.Tried)-1])
+	dir, p := FirstSince([]string{missing, stale, live}, nowMinus(60))
+	if dir != live || filepath.Base(p) != "l.jsonl" {
+		t.Errorf("got %s %s, want the live dir", dir, p)
 	}
 }
 

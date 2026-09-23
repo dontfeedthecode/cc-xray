@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/dontfeedthecode/ccxray/internal/discover"
@@ -19,6 +21,18 @@ var (
 	commit  = "none"
 )
 
+// buildVersion falls back to the module version Go records for
+// `go install …@vX.Y.Z`, which does not pass the release ldflags.
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return version
+}
+
 func main() {
 	var (
 		project = flag.String("project", "", "working directory of the Claude Code session (default: cwd)")
@@ -29,7 +43,7 @@ func main() {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Printf("ccxray %s (%s)\n", version, commit)
+		fmt.Printf("ccxray %s (%s)\n", buildVersion(), commit)
 		return
 	}
 
@@ -50,24 +64,15 @@ func main() {
 			os.Exit(1)
 		}
 		dir = "" // explicit session: do not auto-switch
-	} else {
-		r, err := discover.Resolve(cwd)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n\nchecked:\n", err)
-			for _, d := range r.Tried {
-				fmt.Fprintf(os.Stderr, "  %s\n", d)
-			}
-			fmt.Fprintf(os.Stderr, "\nrun ccxray from the directory Claude Code is working in,\n"+
-				"or pass --project <dir>.\n")
-			os.Exit(1)
-		}
-		dir, path = r.Dir, r.Path
-		if r.Climbed {
-			fmt.Fprintf(os.Stderr, "following session for %s\n", r.CWD)
-		}
 	}
 
-	m := ui.NewModel(ui.Options{Dir: dir, Path: path, ASCII: *ascii})
+	// Without --session the panel starts empty and attaches to the first
+	// session written after launch, in this directory or any parent, rather
+	// than replaying whatever ran last.
+	m := ui.NewModel(ui.Options{
+		Dir: dir, Path: path, ASCII: *ascii,
+		Watch: discover.Candidates(cwd), Since: time.Now(), CWD: cwd,
+	})
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
