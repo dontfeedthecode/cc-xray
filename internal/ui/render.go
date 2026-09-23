@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/dontfeedthecode/ccxray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 	"github.com/mattn/go-runewidth"
 )
 

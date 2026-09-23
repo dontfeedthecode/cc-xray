@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/dontfeedthecode/ccxray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
 
 func seeded(t *testing.T, h int) Model {

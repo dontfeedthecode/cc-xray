@@ -11,10 +11,10 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/dontfeedthecode/ccxray/internal/discover"
-	"github.com/dontfeedthecode/ccxray/internal/record"
-	"github.com/dontfeedthecode/ccxray/internal/tail"
-	"github.com/dontfeedthecode/ccxray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/discover"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/tail"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
 
 type tickMsg time.Time

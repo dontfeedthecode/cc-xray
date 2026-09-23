@@ -35,19 +35,19 @@ never modifies anything.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/ccxray/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh
 ```
 
 Or from inside Claude Code, prefix it with `!` to run it in place:
-`! curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/ccxray/main/install.sh | sh`
+`! curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh`
 
 It downloads a prebuilt binary for your platform, checks it against the
 release's checksums, and puts it in `~/.local/bin` — nothing to build, no
 `sudo`. Set `CCXRAY_INSTALL_DIR` to put it elsewhere, or `CCXRAY_VERSION=vX.Y.Z`
 to pin a release. To uninstall, delete the binary.
 
-With Go instead: `go install github.com/dontfeedthecode/ccxray/cmd/ccxray@latest`.
-Or grab a binary from [Releases](https://github.com/dontfeedthecode/ccxray/releases).
+With Go instead: `go install github.com/dontfeedthecode/cc-xray/cmd/ccxray@latest`.
+Or grab a binary from [Releases](https://github.com/dontfeedthecode/cc-xray/releases).
 
 ## Use
 

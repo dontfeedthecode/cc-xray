@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dontfeedthecode/ccxray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
 )
 
 type ToolCall struct {

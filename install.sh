@@ -1,12 +1,12 @@
 #!/bin/sh
 # Install the latest ccxray release.
-#   curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/ccxray/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh
 #
 # CCXRAY_VERSION=vX.Y.Z     install a specific release
 # CCXRAY_INSTALL_DIR=<dir>  install somewhere other than ~/.local/bin
 set -eu
 
-REPO="dontfeedthecode/ccxray"
+REPO="dontfeedthecode/cc-xray"
 BIN="ccxray"
 
 fail() { echo "ccxray: $*" >&2; exit 1; }

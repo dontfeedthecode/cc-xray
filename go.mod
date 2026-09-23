@@ -1,4 +1,4 @@
-module github.com/dontfeedthecode/ccxray
+module github.com/dontfeedthecode/cc-xray
 
 go 1.24.2
 

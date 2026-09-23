@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dontfeedthecode/ccxray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
 )
 
 // build replays the fixture and returns the completed lighthouse turn.

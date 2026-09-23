@@ -30,5 +30,5 @@ release:
   footer: |
     ## Install
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/ccxray/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh
     ```

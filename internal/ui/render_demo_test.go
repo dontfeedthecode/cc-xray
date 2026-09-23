@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dontfeedthecode/ccxray/internal/record"
-	"github.com/dontfeedthecode/ccxray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
 
 func load(t *testing.T) *turn.Turn {

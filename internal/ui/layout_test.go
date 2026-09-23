@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dontfeedthecode/ccxray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
 
 // An empty turn must not draw table chrome — that was the "weird empty table".

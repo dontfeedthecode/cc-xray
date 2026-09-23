@@ -9,8 +9,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/dontfeedthecode/ccxray/internal/discover"
-	"github.com/dontfeedthecode/ccxray/internal/ui"
+	"github.com/dontfeedthecode/cc-xray/internal/discover"
+	"github.com/dontfeedthecode/cc-xray/internal/ui"
 )
 
 // set by the linker at release time:

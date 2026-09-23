@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dontfeedthecode/ccxray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
 )
 
 // replay feeds inline JSONL through a fresh Builder.
