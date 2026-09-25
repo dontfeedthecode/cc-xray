@@ -48,6 +48,38 @@ func TestStartsEmptyAndAttachesToTheNextSession(t *testing.T) {
 	}
 }
 
+// The reported failure: an editor opens its terminals at the workspace root,
+// so a fresh session there lands in the parent's project dir. Once the
+// session being followed has gone quiet, that one must take over, not only a
+// newer session in the dir first attached to.
+func TestSwitchesToANewSessionInAParentDir(t *testing.T) {
+	child, parent := t.TempDir(), t.TempDir()
+	src, err := os.ReadFile("testdata/session.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(child, "first.jsonl")
+	os.WriteFile(first, src, 0o644)
+
+	m := NewModel(Options{Watch: []string{child, parent}, Since: time.Now().Add(-time.Minute)})
+	m.poll()
+	if m.tl == nil || m.tl.Path() != first {
+		t.Fatal("did not attach to the first session")
+	}
+
+	quiet := time.Now().Add(-time.Minute)
+	os.Chtimes(first, quiet, quiet)
+	next := filepath.Join(parent, "next.jsonl")
+	os.WriteFile(next, src, 0o644)
+	m.poll()
+	if m.tl.Path() != next {
+		t.Fatalf("still following %s, want the new session in the parent dir", m.tl.Path())
+	}
+	if m.dir != parent {
+		t.Errorf("dir = %q, want %q", m.dir, parent)
+	}
+}
+
 // Pressing c empties the panel and waits for the next write, even from the
 // session that was already being followed.
 func TestClearWaitsForTheNextWrite(t *testing.T) {

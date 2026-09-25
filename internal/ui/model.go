@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/dontfeedthecode/cc-xray/internal/discover"
 	"github.com/dontfeedthecode/cc-xray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/skill"
 	"github.com/dontfeedthecode/cc-xray/internal/tail"
 	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
@@ -43,6 +44,8 @@ type Model struct {
 	keys   keyMap
 	follow bool // pinned to the live edge, like tail -f
 	ready  bool
+	usage  bool // the per-model usage breakdown is open
+	skills *skill.Reader
 	forks  map[string]*forkWatch // agentId -> its own tailer and builder
 }
 
@@ -82,7 +85,7 @@ func NewModel(o Options) Model {
 		watch: o.Watch, since: o.Since, cwd: o.CWD,
 		pin: pinned(o),
 		tl:  tl, b: turn.New(),
-		forks: map[string]*forkWatch{},
+		forks: map[string]*forkWatch{}, skills: &skill.Reader{},
 		width: 92, height: 30,
 		spin: sp, help: h, keys: defaultKeys(), follow: true,
 	}
@@ -139,6 +142,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Clear):
 			m.clear()
 			return m, nil
+		case key.Matches(msg, m.keys.Usage):
+			m.usage = !m.usage
+			m.resize()
+			m.refresh()
+			return m, nil
 		case key.Matches(msg, m.keys.Bottom):
 			m.follow = true
 			m.vp.GotoBottom()
@@ -184,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // chromeHeight measures what the header and footer actually render, so the
 // viewport stays correct when either collapses (an empty turn draws neither).
 func (m Model) chromeHeight() int {
-	o := Opts{Width: m.width, Frame: m.frame, Live: m.live(), Spin: m.spin.View()}
+	o := m.opts()
 	n := strings.Count(RenderHeader(m.b.Turn(), m.th, m.g, o), "\n") +
 		strings.Count(RenderFooter(m.b.Turn(), m.th, m.g, o, ""), "\n")
 	return n + 2 // help line + the newline after the viewport
@@ -206,11 +214,12 @@ func (m *Model) refresh() {
 	if !m.ready {
 		return
 	}
-	body := RenderBody(m.b.Turn(), m.th, m.g, Opts{
-		Width: m.width, Frame: m.frame, Live: m.live(), Spin: m.spin.View(),
-	})
+	body := RenderBody(m.b.Turn(), m.th, m.g, m.opts())
 	atBottom := m.vp.AtBottom()
-	m.vp.SetContent(body)
+	// The trailing newline would give the viewport an empty last line, and
+	// in a short pane following the live edge scrolled onto that blank line
+	// and pushed the only row out of sight.
+	m.vp.SetContent(strings.TrimSuffix(body, "\n"))
 	if m.follow || atBottom {
 		m.vp.GotoBottom()
 	}
@@ -252,9 +261,14 @@ func (m *Model) poll() {
 		m.dir, m.tl = dir, tail.New(p)
 	}
 	if m.dir != "" {
-		if p, err := discover.Newest(m.dir); err == nil && p != "" && p != m.tl.Path() {
+		watch := m.watch
+		if len(watch) == 0 {
+			watch = []string{m.dir}
+		}
+		if dir, p := discover.NewestAcross(watch); p != "" && p != m.tl.Path() {
 			fi, err := os.Stat(m.tl.Path())
 			if err != nil || time.Since(fi.ModTime()) > sessionQuiet {
+				m.dir = dir
 				m.tl.Reset(p)
 				m.b = turn.New()
 				m.forks = map[string]*forkWatch{}
@@ -280,6 +294,26 @@ func (m *Model) poll() {
 		m.last = time.Now()
 	}
 	m.pollForks()
+	m.checkSkills()
+}
+
+// checkSkills marks each Skill call whose frontmatter asked for an effort or
+// model it did not get. Claude Code drops these silently, and without a note
+// the panel just shows the old value as if the skill had never asked.
+func (m *Model) checkSkills() {
+	t := m.b.Turn()
+	if t == nil {
+		return
+	}
+	for _, r := range t.Rows {
+		a := r.Action
+		if a == nil || a.SkillDir == "" {
+			continue
+		}
+		if fm, ok := m.skills.Read(a.SkillDir); ok {
+			a.Warn = skill.Check(a.SkillName, fm, a.RanEffort, a.RanModel)
+		}
+	}
 }
 
 // pollForks reads each forked skill's transcript and attaches the resulting
@@ -313,6 +347,30 @@ func (m *Model) pollForks() {
 	turn.MarkConcurrency(m.b.Forks())
 }
 
+func (m Model) opts() Opts {
+	o := Opts{Width: m.width, Frame: m.frame, Live: m.live(), Spin: m.spin.View(),
+		ShowUsage: m.usage}
+	if m.tl != nil {
+		s := m.session()
+		o.Session = &s
+	}
+	return o
+}
+
+// session totals the transcript being followed and every fork read from it.
+// A fork's requests are counted only after the parent's last cost-state
+// record, since Claude Code's own total already includes the ones before.
+func (m Model) session() turn.Session {
+	s := m.b.Session()
+	for _, w := range m.forks {
+		if l := w.b.UsageSince(s.Base); !l.Empty() {
+			s.Ledger.Merge(l)
+			s.Exact = false
+		}
+	}
+	return s
+}
+
 // live reports whether the turn is still running. It deliberately does NOT
 // look at recent file activity: the model can think for 30 seconds before
 // writing anything, and treating that silence as "finished" made the panel
@@ -336,7 +394,7 @@ func (m Model) View() string {
 	if !m.ready {
 		return m.th.Dim.Render("  starting\u2026")
 	}
-	o := Opts{Width: m.width, Frame: m.frame, Live: m.live(), Spin: m.spin.View()}
+	o := m.opts()
 
 	var b strings.Builder
 	b.WriteString(RenderHeader(m.b.Turn(), m.th, m.g, o))

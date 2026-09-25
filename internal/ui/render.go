@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/dontfeedthecode/cc-xray/internal/record"
 	"github.com/dontfeedthecode/cc-xray/internal/turn"
+	"github.com/dontfeedthecode/cc-xray/internal/usage"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -118,6 +120,9 @@ type Opts struct {
 	Width, Rows, Frame int
 	Live               bool
 	Spin               string // pre-rendered spinner frame from bubbles
+	// Session is the whole transcript's usage; nil draws no session figure.
+	Session   *turn.Session
+	ShowUsage bool // draw the per-model breakdown under the totals
 }
 
 func (o Opts) spinFrame(g Glyphs) string {
@@ -191,10 +196,38 @@ func RenderBody(t *turn.Turn, th Theme, g Glyphs, o Opts) string {
 		rows = rows[len(rows)-o.Rows:]
 	}
 
-	for _, r := range rows {
+	for i := 0; i < len(rows); i++ {
+		r := rows[i]
+		// A skill entered through the Skill tool is announced twice: by the
+		// call, and by the band that marks the requests after it running
+		// under the skill. The call row takes the band's place.
+		if a := r.Action; a != nil && i+1 < len(rows) {
+			if c := rows[i+1].Change; c != nil && entersSkill(a, c) {
+				b.WriteString(renderSkillEntry(a, c, th, g, o, l) + "\n")
+				b.WriteString(warning(a, th, width))
+				if n := narration(a, th, width); n != "" {
+					b.WriteString(n + "\n")
+				}
+				if c.Detail != "" {
+					b.WriteString(th.Faint.Render("  "+
+						strings.Repeat(" ", colModel)+c.Detail) + "\n")
+				}
+				i++
+				continue
+			}
+		}
 		switch {
 		case r.Fork != nil:
 			b.WriteString(renderFork(r.Fork, th, g, width, l))
+		case r.Change != nil && r.Change.Kind == turn.ChangePrompt:
+			// Sent while a background fork ran, so it joins this turn rather
+			// than replacing it; drawn the way the pinned prompt is.
+			b.WriteString("  " + th.Live.Render(g.Bar) + " " +
+				th.Text.Render(padDesc(r.Change.Label, width-6)) + "\n")
+		case r.Change != nil && r.Change.Kind == turn.ChangeReturn:
+			c := r.Change
+			line := "  " + g.Enter + " returned  " + c.Label + "  ·  " + c.Detail
+			b.WriteString(th.Gold.Render(padR(line, width-2)) + "\n")
 		case r.Change != nil:
 			c := r.Change
 			style := th.Band
@@ -210,6 +243,10 @@ func RenderBody(t *turn.Turn, th Theme, g Glyphs, o Opts) string {
 			}
 		case r.Action != nil:
 			b.WriteString(renderAction(r.Action, th, g, o, l) + "\n")
+			b.WriteString(warning(r.Action, th, width))
+			if n := narration(r.Action, th, width); n != "" {
+				b.WriteString(n + "\n")
+			}
 		}
 	}
 	// The lanes read every fork in the turn, not the visible slice, so
@@ -261,6 +298,62 @@ func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 	return row
 }
 
+// entersSkill reports whether c is the band for the skill that call a just
+// launched.
+func entersSkill(a *turn.Action, c *turn.Change) bool {
+	if a.Tool != "Skill" || !strings.HasPrefix(c.Label, "SKILL  ") {
+		return false
+	}
+	name := strings.TrimPrefix(c.Label, "SKILL  ")
+	f := strings.Fields(a.Desc)
+	return len(f) > 0 && f[0] == name
+}
+
+// renderSkillEntry draws a Skill call in the band's colours, keeping its own
+// OUT and Δt, so one row says both that the skill was called and that what
+// follows runs under it.
+func renderSkillEntry(a *turn.Action, c *turn.Change, th Theme, g Glyphs, o Opts, l layout) string {
+	gut := "  "
+	if a.Thinking {
+		gut = g.Think + " "
+	}
+	tool := g.Enter + " Skill"
+	desc := a.Desc
+	w := colTool + 1 + l.desc
+	cell := padDesc(tool+"  "+desc, w)
+	row := gut + padR(modelCell(a.Model, a.Effort), colModel) + cell
+	if l.showOut {
+		row += padL(comma(a.Out), colOut)
+	}
+	if l.dt {
+		row += "  " + padL(dur(a.Dt), colDt)
+	}
+	return th.Band.Render(row)
+}
+
+// warning draws what a skill asked for and did not get, directly under its
+// call and above the narration, since it explains the rows that follow.
+func warning(a *turn.Action, th Theme, width int) string {
+	if a.Warn == "" {
+		return ""
+	}
+	pad := colGutter + colModel
+	return th.Gold.Render(strings.Repeat(" ", pad)+padDesc("! "+a.Warn, width-pad-2)) + "\n"
+}
+
+// narration draws the words the model led a tool call with, on a faint line
+// under the call and aligned with the ACTION column. Claude Code shows this
+// text first, often seconds before the call, so leaving it out made the panel
+// look as if it had skipped the model's first move. Answer and pending rows
+// already show their words as the description and get no second line.
+func narration(a *turn.Action, th Theme, width int) string {
+	if a.Say == "" || a.Tool == "" || a.Pending {
+		return ""
+	}
+	pad := colGutter + colModel
+	return th.Dimmer.Render(strings.Repeat(" ", pad) + padDesc(a.Say, width-pad-2))
+}
+
 // actionCell fills the ACTION column with an optional tool name followed by
 // the description, padded as one unit so the columns after it stay aligned
 // whether or not a name was printed.
@@ -283,11 +376,14 @@ func RenderFooter(t *turn.Turn, th Theme, g Glyphs, o Opts, note string) string 
 	width := o.w()
 	var b strings.Builder
 	b.WriteString(th.Faint.Render("  "+strings.Repeat(g.Rule, width-4)) + "\n")
-	line := footer(t, th, g, width, o.Live, o.Frame, o.spinFrame(g))
+	line := footer(t, th, g, width, o)
 	if note != "" {
 		line = overlayRight(line, th.Gold.Render(note), width)
 	}
 	b.WriteString(line + "\n")
+	if o.ShowUsage {
+		b.WriteString(renderUsage(t, o.Session, th, width))
+	}
 	return b.String()
 }
 
@@ -540,18 +636,34 @@ func short(id string) string {
 }
 
 // footer sheds its parts rather than overrunning a narrow panel.
-func footer(t *turn.Turn, th Theme, g Glyphs, width int, live bool, frame int, spin string) string {
+func footer(t *turn.Turn, th Theme, g Glyphs, width int, o Opts) string {
 	label, plainLabel := th.Dimmer.Render("turn complete"), "turn complete"
-	if live {
-		if spin == "" {
-			spin = builtinSpin(g, frame)
-		}
+	if o.Live {
+		spin := o.spinFrame(g)
 		label, plainLabel = th.Live.Render(spin+" running"), spin+" running"
 	}
 	stat := fmt.Sprintf("   %d req  ·  %s ctx", t.Requests, kilo(t.PeakCtx))
 	totals := comma(t.OutTokens) + "  " + dur(t.Duration)
 
+	// Cost joins the left-hand stats: the right-hand totals sit under the
+	// OUT and Δt columns and must stay there. Each figure drops in turn as
+	// the panel narrows, least useful first.
+	led := turnUsage(t)
+	var cached, turnCost, sessCost string
+	if s := led.Tokens().CacheShare(); s >= 0 {
+		cached = fmt.Sprintf("  ·  %d%% cached", int(s*100))
+	}
+	if !led.Empty() {
+		turnCost = "  ·  " + money(led.Cost(), led.Unpriced) + " turn"
+	}
+	if ss := o.Session; ss != nil && !ss.Ledger.Empty() {
+		sessCost = "  ·  " + sessionMoney(*ss) + " session"
+	}
+
 	for _, v := range []struct{ stat, totals string }{
+		{stat + cached + turnCost + sessCost, totals},
+		{stat + turnCost + sessCost, totals},
+		{stat + turnCost, totals},
 		{stat, totals}, {"", totals}, {"", dur(t.Duration)}, {"", ""},
 	} {
 		used := 2 + runewidth.StringWidth(plainLabel) +
@@ -562,6 +674,100 @@ func footer(t *turn.Turn, th Theme, g Glyphs, width int, live bool, frame int, s
 		}
 	}
 	return "  " + label
+}
+
+// turnUsage is the turn's own requests plus every fork it launched, which is
+// what the turn actually cost.
+func turnUsage(t *turn.Turn) usage.Ledger {
+	var l usage.Ledger
+	l.Merge(t.Usage)
+	for _, r := range t.Rows {
+		if r.Fork != nil && r.Fork.Nested != nil {
+			l.Merge(r.Fork.Nested.Usage)
+		}
+	}
+	return l
+}
+
+// money formats a cost. A total that includes an unpriced model is a floor,
+// and says so.
+func money(c float64, floor bool) string {
+	s := fmt.Sprintf("$%.2f", c)
+	if c > 0 && c < 0.005 {
+		s = "<$0.01"
+	}
+	if floor {
+		s = "≥" + s
+	}
+	return s
+}
+
+// sessionMoney marks an estimate with ~. Only Claude Code's own total, with
+// nothing after it, is exact.
+func sessionMoney(s turn.Session) string {
+	m := money(s.Ledger.Cost(), s.Ledger.Unpriced)
+	if !s.Exact {
+		m = "~" + m
+	}
+	return m
+}
+
+// tokens abbreviates a token count the way /usage does: 7.3k, 1.1m.
+func tokens(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprint(n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%.1fm", float64(n)/1e6)
+	}
+}
+
+// renderUsage draws the per-model breakdown /usage gives, for the turn and
+// for the session, under the totals line.
+func renderUsage(t *turn.Turn, s *turn.Session, th Theme, width int) string {
+	var b strings.Builder
+	line := func(style lipgloss.Style, text string) {
+		b.WriteString(style.Render(padR(text, width-2)) + "\n")
+	}
+	row := func(name string, tk usage.Tokens, cost string) string {
+		return "    " + padR(name, colModel-2) + padL(tokens(tk.In), 8) +
+			padL(tokens(tk.Out), 9) + padL(tokens(tk.CacheRead), 12) +
+			padL(tokens(tk.Write()), 13) + padL(cost, 10)
+	}
+	section := func(title, note string, l usage.Ledger) {
+		b.WriteString(th.Text.Render("  "+title) + th.Faint.Render(padR(note, width-4-runewidth.StringWidth(title))) + "\n")
+		if l.Empty() {
+			line(th.Faint, "    no requests yet")
+			return
+		}
+		for _, ln := range l.Lines() {
+			cost := money(ln.Cost, false)
+			if _, ok := usage.Cost(ln.Model, usage.Tokens{}, false); !ok {
+				cost = "no price"
+			}
+			line(th.Dim, row(record.ShortModel(ln.Model), ln.Tokens, cost))
+		}
+		if sh := l.Tokens().CacheShare(); sh >= 0 {
+			line(th.Faint, fmt.Sprintf("    %d%% of input from cache", int(sh*100)))
+		}
+	}
+
+	line(th.Head, "  "+padR("USAGE", colModel)+padL("INPUT", 8)+padL("OUTPUT", 9)+
+		padL("CACHE READ", 12)+padL("CACHE WRITE", 13)+padL("COST", 10))
+	section("this turn", "", turnUsage(t))
+	if s != nil {
+		note := "  estimate · a few Claude Code calls never reach the transcript"
+		switch {
+		case s.Exact:
+			note = "  Claude Code's own total"
+		case !s.Base.IsZero():
+			note = "  Claude Code's total, plus an estimate since"
+		}
+		section("session", note, s.Ledger)
+	}
+	return b.String()
 }
 
 func builtinSpin(g Glyphs, frame int) string {

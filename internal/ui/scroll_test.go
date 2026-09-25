@@ -89,6 +89,21 @@ func TestViewportTracksChromeHeight(t *testing.T) {
 	}
 }
 
+// In a pane with room for a single body line, following the live edge must
+// land on the newest row, not on a blank line after it.
+func TestShortPaneShowsTheNewestRow(t *testing.T) {
+	m := seeded(t, 30)
+	h := m.chromeHeight() + 1
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 92, Height: h})
+	m = mm.(Model)
+	if m.vp.Height != 1 {
+		t.Fatalf("viewport height = %d, want 1", m.vp.Height)
+	}
+	if got := strings.TrimSpace(stripANSI(m.vp.View())); !strings.Contains(got, "answer") {
+		t.Errorf("one-line pane shows %q, want the closing answer row", got)
+	}
+}
+
 func TestHelpLineListsBindings(t *testing.T) {
 	m := seeded(t, 20)
 	v := stripANSI(m.View())

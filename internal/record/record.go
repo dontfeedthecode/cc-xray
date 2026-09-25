@@ -26,6 +26,30 @@ type Usage struct {
 	Details             struct {
 		ThinkingTokens int `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
+	// CacheCreation splits the cache write by TTL, which prices differently.
+	// Older transcripts omit it; the total is then taken as a 5-minute write.
+	CacheCreation *struct {
+		Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
+	Speed string `json:"speed"` // "standard" | "fast"
+}
+
+// Writes returns the cache write split by TTL.
+func (u Usage) Writes() (w5m, w1h int) {
+	if c := u.CacheCreation; c != nil && c.Ephemeral5m+c.Ephemeral1h > 0 {
+		return c.Ephemeral5m, c.Ephemeral1h
+	}
+	return u.CacheCreationTokens, 0
+}
+
+// ModelUsage is one model's line in a cost-state record.
+type ModelUsage struct {
+	InputTokens         int     `json:"inputTokens"`
+	OutputTokens        int     `json:"outputTokens"`
+	CacheReadTokens     int     `json:"cacheReadInputTokens"`
+	CacheCreationTokens int     `json:"cacheCreationInputTokens"`
+	CostUSD             float64 `json:"costUSD"`
 }
 
 type Block struct {
@@ -94,10 +118,13 @@ type Record struct {
 	IsSidechain      bool    `json:"isSidechain"`
 	IsMeta           bool    `json:"isMeta"`
 	IsCompactSummary bool    `json:"isCompactSummary"`
-	SessionID        string  `json:"sessionId"`
-	Version          string  `json:"version"`
-	CWD              string  `json:"cwd"`
-	GitBranch        string  `json:"gitBranch"`
+	// SourceToolUseID ties a record Claude Code injects for a tool call, such
+	// as a skill's loaded instructions, to the call that caused it.
+	SourceToolUseID string `json:"sourceToolUseID"`
+	SessionID       string `json:"sessionId"`
+	Version         string `json:"version"`
+	CWD             string `json:"cwd"`
+	GitBranch       string `json:"gitBranch"`
 
 	// type == "system", subtype == "turn_duration"
 	DurationMs   int `json:"durationMs"`
@@ -114,6 +141,12 @@ type Record struct {
 	// system records and an object elsewhere, so it is decoded lazily for
 	// the same reason.
 	Content json.RawMessage `json:"content"`
+
+	// type == "cost-state": Claude Code's own session totals, the numbers
+	// /usage shows. Written only when a session is left (exit, /clear,
+	// /resume), and carried forward when it is resumed.
+	TotalCostUSD float64               `json:"totalCostUSD"`
+	ModelUsage   map[string]ModelUsage `json:"modelUsage"`
 
 	// sidecar record types
 	LastPrompt     string `json:"lastPrompt"`
@@ -228,6 +261,51 @@ func (r Record) ForkedLaunch() (agentID, skill string, ok bool) {
 		return "", "", false
 	}
 	return v.AgentID, v.SkillName, true
+}
+
+// SkillDir returns the folder of a skill whose instructions this record
+// loads. Claude Code opens them with "Base directory for this skill: <dir>".
+// A skill called again in the same session is not reloaded, and its record
+// carries no directory.
+func (r Record) SkillDir() string {
+	if r.Type != "user" || !r.IsMeta {
+		return ""
+	}
+	t := r.Message.PromptText()
+	const lead = "Base directory for this skill: "
+	if !strings.HasPrefix(t, lead) {
+		return ""
+	}
+	t = t[len(lead):]
+	if i := strings.IndexByte(t, '\n'); i >= 0 {
+		t = t[:i]
+	}
+	return strings.TrimSpace(t)
+}
+
+// TaskNotification returns the task a background completion notice reports
+// on. For a forked skill the task id is the fork's agent id. The notice
+// arrives as an ordinary user record, often a turn or two after the one that
+// launched the task, since the user can go on talking in the meantime.
+func (r Record) TaskNotification() (taskID string, ok bool) {
+	if r.Type != "user" {
+		return "", false
+	}
+	t := strings.TrimSpace(r.Message.PromptText())
+	if !strings.HasPrefix(t, "<task-notification>") {
+		return "", false
+	}
+	const open, close = "<task-id>", "</task-id>"
+	i := strings.Index(t, open)
+	if i < 0 {
+		return "", false
+	}
+	rest := t[i+len(open):]
+	j := strings.Index(rest, close)
+	if j < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[:j]), true
 }
 
 // Result decodes toolUseResult when it is an object, reporting false when it

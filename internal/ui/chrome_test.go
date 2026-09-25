@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/dontfeedthecode/cc-xray/internal/turn"
 )
 
 // The header and footer are drawn outside the viewport, so the body must not
@@ -55,13 +56,29 @@ func TestEffortMergedIntoModelColumn(t *testing.T) {
 	}
 }
 
-// Narration under each row is gone; the answer row keeps its text.
-func TestNoNarrationLines(t *testing.T) {
-	v := stripANSI(Render(load(t), NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 40}))
-	if strings.Contains(v, "› ") {
-		t.Error("narration continuation lines should be gone")
+// Claude Code shows the model's narration before its tool call, so the panel
+// must too, or its first move looks missed. It sits under the first call of
+// its own request only, never repeated down a request's calls, and the old
+// "› " continuation marker stays gone.
+func TestNarrationUnderItsOwnCall(t *testing.T) {
+	lines := splitLines(stripANSI(Render(load(t), NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 40})))
+	at := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "Verify the URL argument is provided") {
+			at = i
+		}
 	}
-	if !strings.Contains(v, "answer") {
+	if at < 0 || at+1 >= len(lines) ||
+		!strings.Contains(lines[at+1], "Starting with the required check command.") {
+		t.Fatal("narration missing from under the call it led to")
+	}
+	if n := strings.Count(strings.Join(lines, "\n"), "Starting with the required check command."); n != 1 {
+		t.Errorf("narration drawn %d times, want once", n)
+	}
+	if strings.Contains(strings.Join(lines, "\n"), "› ") {
+		t.Error("the old narration continuation marker is back")
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "answer") {
 		t.Error("the closing answer row should remain")
 	}
 }
@@ -87,4 +104,28 @@ func TestDefaultToolIsNotNamed(t *testing.T) {
 		}
 	}
 	t.Error("expected row not found")
+}
+
+// A skill entered through the Skill tool draws one row, not the call followed
+// by a band repeating its name.
+func TestSkillCallAndBandAreOneRow(t *testing.T) {
+	v := stripANSI(Render(load(t), NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 40}))
+	if strings.Contains(v, "SKILL  lighthouse-audit") {
+		t.Errorf("the band still repeats the Skill call:\n%s", v)
+	}
+	if n := strings.Count(v, "▸ Skill  lighthouse-audit"); n != 1 {
+		t.Errorf("skill entry drawn %d times, want once:\n%s", n, v)
+	}
+}
+
+// A skill typed as /name has no call row to merge into, so its band stays.
+func TestSlashSkillKeepsItsBand(t *testing.T) {
+	tn := &turn.Turn{Prompt: "/lighthouse-audit", Rows: []turn.Row{
+		{Change: &turn.Change{Label: "SKILL  lighthouse-audit", Model: "opus-5"}},
+		{Action: &turn.Action{Model: "opus-5", Tool: "Bash", Desc: "step"}},
+	}}
+	v := stripANSI(Render(tn, NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 40}))
+	if !strings.Contains(v, "SKILL  lighthouse-audit") {
+		t.Errorf("slash-invoked skill lost its band:\n%s", v)
+	}
 }

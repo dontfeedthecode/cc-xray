@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/dontfeedthecode/cc-xray/internal/record"
+	"github.com/dontfeedthecode/cc-xray/internal/usage"
 )
 
 type ToolCall struct {
 	Say    string // the model's own words from the same request
 	Name   string
+	Skill  string // the skill a Skill call names
 	Desc   string
 	At     time.Time
 	ID     string
@@ -39,6 +41,8 @@ type request struct {
 	Say      string
 	Tools    []ToolCall
 	Stop     string
+	Tok      usage.Tokens // rule 1 applies: the max seen, never a sum
+	Fast     bool
 }
 
 type Action struct {
@@ -50,10 +54,24 @@ type Action struct {
 	Desc     string
 	Thinking bool
 	Failed   bool
-	Pending  bool   // in flight: the model has started but not yet acted
-	Say      string // set only on answer/pending rows, where it IS the content
-	Out      int
-	Dt       time.Duration
+	Pending  bool // in flight: the model has started but not yet acted
+	// Say is the model's own words from the request. On answer and pending
+	// rows it IS the content; on a tool row it is the narration that led to
+	// the call, carried by the first call of its request only.
+	Say string
+	Out int
+	Dt  time.Duration
+
+	// Set on a Skill call only. SkillDir is where its SKILL.md lives, and
+	// RanEffort/RanModel what the skill's first request actually ran at, so
+	// the caller can compare them with what the skill's frontmatter asked for.
+	SkillName string
+	SkillDir  string
+	RanEffort string
+	RanModel  string
+	// Warn is filled in by the caller, which can read the skill's files:
+	// what the skill asked for and did not get.
+	Warn string
 }
 
 type Change struct {
@@ -63,7 +81,17 @@ type Change struct {
 	Model   string
 	Effort  string
 	Applied bool // did model/effort actually move
+	// Kind is empty for a state change. ChangePrompt is a message the user
+	// sent while a background fork was still running, and ChangeReturn the
+	// moment such a fork reported back; Label then carries the prompt text
+	// or the fork's skill.
+	Kind string
 }
+
+const (
+	ChangePrompt = "prompt"
+	ChangeReturn = "return"
+)
 
 // Fork marks a skill that ran as a subagent (`context: fork`). Its own
 // actions live in a separate transcript; Nested is attached by the caller
@@ -73,11 +101,14 @@ type Fork struct {
 	ParentID   string // tool_use id of the Skill call that launched it
 	Skill      string
 	Background bool
-	At         time.Time
-	Nested     *Turn   // nil until the fork transcript is loaded
-	Peers      int     // other forks running at the same time; see MarkConcurrency
-	Group      int     // forks launched in this turn, this one included
-	From, To   float64 // where this run sat in the group's span, 0..1
+	// Notified is set once Claude Code has told the parent this background
+	// fork finished. Until then the turn that launched it stays open.
+	Notified bool
+	At       time.Time
+	Nested   *Turn   // nil until the fork transcript is loaded
+	Peers    int     // other forks running at the same time; see MarkConcurrency
+	Group    int     // forks launched in this turn, this one included
+	From, To float64 // where this run sat in the group's span, 0..1
 }
 
 // MarkConcurrency records how many other forks overlapped each one in time.
@@ -161,6 +192,20 @@ type Turn struct {
 	Duration   time.Duration
 	Complete   bool
 	Malformed  int
+	// Usage prices this turn's own requests. A fork's usage lives on its
+	// Nested turn and is not included.
+	Usage usage.Ledger
+}
+
+// Session is the usage of the whole transcript, as /usage would report it.
+type Session struct {
+	Ledger usage.Ledger
+	// Base is when Claude Code's own total was last written. Requests after
+	// it are priced here; zero when there is no cost-state record.
+	Base time.Time
+	// Exact is set when Claude Code's total covers everything seen, which is
+	// only true between leaving a session and the next request after resuming.
+	Exact bool
 }
 
 // Builder consumes records in stream order and maintains the current turn.
@@ -187,6 +232,11 @@ type Builder struct {
 	forkSeen   map[string]bool
 	failed     map[string]bool // tool_use id -> the call errored
 	authDur    bool            // Duration came from a system/turn_duration record
+	// merged is set once the turn has taken in more than one exchange: a
+	// prompt sent while a background fork ran, or the fork's return. A
+	// turn_duration record then times only the latest exchange, so the
+	// turn is timed by the wall clock instead.
+	merged bool
 
 	// A compact_boundary lands after the previous turn has closed and before
 	// the next prompt arrives, so it is held here until there is a turn to
@@ -197,13 +247,40 @@ type Builder struct {
 	// permission-mode switch or a compaction. rebuild replaces Rows wholesale,
 	// so they are held here and spliced back in by timestamp on every pass.
 	marks []*Change
+
+	// Session usage outlives the turn. sess holds every request in the
+	// transcript; base is the latest cost-state total, and baseIdx the number
+	// of requests it already covers.
+	sess     []*sessReq
+	sessByID map[string]*sessReq
+	base     usage.Ledger
+	baseAt   time.Time
+	baseIdx  int
+	hasBase  bool
+	lastAt   time.Time // latest timestamp seen; cost-state carries none
+
+	// Where each skill was loaded from, by the Skill call that loaded it and
+	// by name. A skill called a second time is not reloaded and names no
+	// directory, so the name carries the first one forward.
+	skillDirs map[string]string
+	dirByName map[string]string
+}
+
+// sessReq is one request's usage, kept for the life of the transcript.
+type sessReq struct {
+	model string
+	first time.Time
+	tok   usage.Tokens
+	fast  bool
 }
 
 type stateKey struct{ model, effort, skill string }
 
 func New() *Builder {
 	return &Builder{byID: map[string]*request{}, seen: map[string]bool{},
-		forkSeen: map[string]bool{}, failed: map[string]bool{}}
+		forkSeen: map[string]bool{}, failed: map[string]bool{},
+		sessByID: map[string]*sessReq{}, skillDirs: map[string]string{},
+		dirByName: map[string]string{}}
 }
 
 // NewFork returns a Builder for a forked skill's own transcript. A fork has
@@ -240,6 +317,9 @@ func (b *Builder) Add(r record.Record) {
 	if b.fork && b.cur.Start.IsZero() {
 		b.cur.Start = r.Time()
 	}
+	if t := r.Time(); !t.IsZero() {
+		b.lastAt = t
+	}
 
 	// A forked skill is announced on the user record carrying the tool result.
 	// Recorded before the prompt check so it is never mistaken for a new turn.
@@ -256,6 +336,22 @@ func (b *Builder) Add(r record.Record) {
 		return
 	}
 
+	// A background fork reporting back. The reply that follows belongs to the
+	// turn that launched the fork, even if the user has spoken since.
+	if id, ok := r.TaskNotification(); ok && !b.fork {
+		for _, f := range b.forks {
+			if f.AgentID == id && !f.Notified {
+				f.Notified = true
+				b.marks = append(b.marks, &Change{
+					Time: r.Time(), Kind: ChangeReturn, Label: f.Skill,
+					Detail: "agent " + shortID(f.AgentID),
+				})
+				b.reopen()
+			}
+		}
+		return
+	}
+
 	switch {
 	// Checked before IsUserPrompt: a command typed bare reaches us as an
 	// ordinary user record and would otherwise be taken for a prompt.
@@ -267,7 +363,11 @@ func (b *Builder) Add(r record.Record) {
 		// may reset that turn and discard the rows already gathered.
 		if !b.fork {
 			b.pendingCmd = "" // a typed prompt outranks a pending command
-			b.startTurn(r)
+			if b.waiting() {
+				b.followUp(strings.TrimSpace(r.Message.PromptText()), r.Time())
+			} else {
+				b.startTurn(r)
+			}
 		}
 		return
 	case r.Type == "last-prompt" && b.cur != nil && b.cur.Prompt == "":
@@ -275,6 +375,9 @@ func (b *Builder) Add(r record.Record) {
 		return
 	case r.Type == "ai-title" && b.cur != nil:
 		b.cur.Title = r.AITitle
+		return
+	case r.Type == "cost-state":
+		b.setBase(r)
 		return
 	case r.Type == "permission-mode":
 		// Rule 6: a snapshot, not an event. Only a differing value is a change.
@@ -323,20 +426,36 @@ func (b *Builder) Add(r record.Record) {
 	case r.Type == "system" && r.Subtype == "turn_duration":
 		// Rule 4: authoritative turn end and total.
 		if b.cur != nil {
-			b.cur.Duration = time.Duration(r.DurationMs) * time.Millisecond
-			b.authDur = true
 			b.cur.End = r.Time()
-			b.cur.Complete = true
+			if b.merged {
+				b.cur.Duration = b.cur.End.Sub(b.cur.Start)
+			} else {
+				b.cur.Duration = time.Duration(r.DurationMs) * time.Millisecond
+				b.authDur = true
+			}
+			// The model has finished answering, but a background fork it
+			// launched is still out: the turn is not over until it returns.
+			b.cur.Complete = !b.waiting()
 			b.flush()
 		}
 		return
-	case r.Type != "assistant":
+	case r.Type != "assistant" && r.Type != "user":
 		return
 	}
 
 	// A user record may carry tool_result blocks; mark the failures so the
 	// row that caused them can be flagged.
-	if r.Type == "user" && b.cur != nil {
+	if r.Type == "user" {
+		if dir := r.SkillDir(); dir != "" && r.SourceToolUseID != "" {
+			b.skillDirs[r.SourceToolUseID] = dir
+			if name := b.skillFor(r.SourceToolUseID); name != "" {
+				b.dirByName[name] = dir
+			}
+			b.rebuild()
+		}
+		if b.cur == nil {
+			return
+		}
 		var marked bool
 		for _, blk := range r.Message.Blocks() {
 			if blk.Failed() && blk.ToolUseID != "" {
@@ -354,6 +473,10 @@ func (b *Builder) Add(r record.Record) {
 	if r.Synthetic() {
 		return
 	}
+	// Session usage counts every request, including any made before a turn
+	// could be opened, so it is recorded ahead of the turn checks below.
+	tok, fast := tokensOf(r.Message.Usage)
+	b.addSession(r, tok, fast)
 	// Assistant work following a slash command is what proves the command
 	// opened a turn, so the turn is started here rather than on the command
 	// record itself.
@@ -385,6 +508,8 @@ func (b *Builder) Add(r record.Record) {
 	}
 	req.Last = r.Time()
 	req.Stop = r.Message.StopReason
+	req.Tok = maxTokens(req.Tok, tok)
+	req.Fast = req.Fast || fast
 	// Rule 1 again: take the maximum rather than adding, so a re-stated value
 	// on a later block of the same request cannot inflate the total.
 	if v := r.Message.Usage.OutputTokens; v > req.Out {
@@ -410,7 +535,7 @@ func (b *Builder) Add(r record.Record) {
 		case "tool_use":
 			req.Tools = append(req.Tools, ToolCall{
 				Name: blk.Name, Desc: describe(blk.Name, blk.Input),
-				At: r.Time(), ID: blk.ID,
+				At: r.Time(), ID: blk.ID, Skill: skillInput(blk.Name, blk.Input),
 			})
 		}
 	}
@@ -432,6 +557,7 @@ func (b *Builder) startTurn(r record.Record) {
 	b.forks = nil
 	b.forkSeen = map[string]bool{}
 	b.authDur = false
+	b.merged = false
 	// Model and effort are session state and carry into the next turn; a
 	// skill is scoped to the turn that invoked it. Carrying its name across
 	// made every turn after a skill open with "SKILL ENDS", reporting in the
@@ -444,6 +570,10 @@ func (b *Builder) startTurn(r record.Record) {
 // startCommandTurn opens a turn for a slash command, pinning the command
 // itself as the prompt: it is what the user typed.
 func (b *Builder) startCommandTurn(name string, at time.Time) {
+	if b.waiting() {
+		b.followUp(name, at)
+		return
+	}
 	b.cur = &Turn{Prompt: name, Start: at}
 	b.marks = nil
 	if b.pendingCompact != nil {
@@ -456,6 +586,7 @@ func (b *Builder) startCommandTurn(name string, at time.Time) {
 	b.forks = nil
 	b.forkSeen = map[string]bool{}
 	b.authDur = false
+	b.merged = false
 	// Model and effort are session state and carry into the next turn; a
 	// skill is scoped to the turn that invoked it. Carrying its name across
 	// made every turn after a skill open with "SKILL ENDS", reporting in the
@@ -463,6 +594,167 @@ func (b *Builder) startCommandTurn(name string, at time.Time) {
 	b.entryKey = b.lastKey
 	b.entryKey.skill = ""
 	b.started = true
+}
+
+// waiting reports whether a background fork launched in this turn is still
+// out. A fork whose own transcript has ended counts as back even before the
+// notice arrives, so one that never reports cannot hold the turn open for
+// good.
+func (b *Builder) waiting() bool {
+	if b.cur == nil || b.fork {
+		return false
+	}
+	for _, f := range b.forks {
+		if f.Background && !f.Notified && (f.Nested == nil || !f.Nested.Complete) {
+			return true
+		}
+	}
+	return false
+}
+
+// followUp keeps a prompt sent while a background fork runs inside the turn
+// that launched the fork. Opening a new turn threw the fork away: its rows
+// stopped updating and its return landed on a turn that had never heard of
+// it, so the panel never showed it finishing.
+func (b *Builder) followUp(text string, at time.Time) {
+	b.marks = append(b.marks, &Change{Time: at, Kind: ChangePrompt, Label: text})
+	b.reopen()
+}
+
+// reopen marks the turn live again after a new exchange joins it.
+func (b *Builder) reopen() {
+	b.merged = true
+	b.authDur = false
+	b.cur.Complete = false
+	b.rebuild()
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// skillInput names the skill a Skill call asks for.
+func skillInput(tool string, raw json.RawMessage) string {
+	if tool != "Skill" || len(raw) == 0 {
+		return ""
+	}
+	var in struct {
+		Skill string `json:"skill"`
+	}
+	_ = json.Unmarshal(raw, &in)
+	return in.Skill
+}
+
+// skillFor finds which skill a Skill call in this turn named.
+func (b *Builder) skillFor(toolID string) string {
+	for _, rq := range b.reqs {
+		for _, tc := range rq.Tools {
+			if tc.ID == toolID {
+				return tc.Skill
+			}
+		}
+	}
+	return ""
+}
+
+// seatSkill records where a Skill call's skill lives and what its first
+// request under the skill actually ran at.
+func (b *Builder) seatSkill(a *Action, tc ToolCall) {
+	a.SkillName = tc.Skill
+	a.SkillDir = b.skillDirs[tc.ID]
+	if a.SkillDir == "" {
+		a.SkillDir = b.dirByName[tc.Skill]
+	}
+	for _, rq := range b.reqs {
+		if rq.Skill == tc.Skill && rq.First.After(tc.At) {
+			a.RanEffort, a.RanModel = rq.Effort, rq.Model
+			return
+		}
+	}
+}
+
+// tokensOf reads one record's usage.
+func tokensOf(u record.Usage) (usage.Tokens, bool) {
+	w5m, w1h := u.Writes()
+	return usage.Tokens{
+		In: u.InputTokens, Out: u.OutputTokens, CacheRead: u.CacheReadTokens,
+		Write5m: w5m, Write1h: w1h,
+	}, u.Speed == "fast"
+}
+
+// maxTokens applies rule 1 field by field: usage is restated on every record
+// of a request, so the largest value seen is the request's own.
+func maxTokens(a, b usage.Tokens) usage.Tokens {
+	m := func(x, y int) int {
+		if y > x {
+			return y
+		}
+		return x
+	}
+	return usage.Tokens{
+		In: m(a.In, b.In), Out: m(a.Out, b.Out), CacheRead: m(a.CacheRead, b.CacheRead),
+		Write5m: m(a.Write5m, b.Write5m), Write1h: m(a.Write1h, b.Write1h),
+	}
+}
+
+func (b *Builder) addSession(r record.Record, tok usage.Tokens, fast bool) {
+	id := r.RequestID
+	if id == "" {
+		id = r.UUID
+	}
+	sr := b.sessByID[id]
+	if sr == nil {
+		sr = &sessReq{model: r.Message.Model, first: r.Time()}
+		b.sessByID[id] = sr
+		b.sess = append(b.sess, sr)
+	}
+	sr.tok = maxTokens(sr.tok, tok)
+	sr.fast = sr.fast || fast
+}
+
+// setBase adopts a cost-state record as the session's exact total so far. It
+// is cumulative, so the latest one replaces any before it.
+func (b *Builder) setBase(r record.Record) {
+	var l usage.Ledger
+	for model, mu := range r.ModelUsage {
+		l.AddPriced(model, usage.Tokens{
+			In: mu.InputTokens, Out: mu.OutputTokens, CacheRead: mu.CacheReadTokens,
+			Write1h: mu.CacheCreationTokens,
+		}, mu.CostUSD)
+	}
+	b.base, b.baseAt, b.baseIdx, b.hasBase = l, b.lastAt, len(b.sess), true
+}
+
+// Session totals the transcript: Claude Code's own figure where it wrote
+// one, plus the requests priced here since.
+func (b *Builder) Session() Session {
+	var s Session
+	start := 0
+	if b.hasBase {
+		s.Ledger.Merge(b.base)
+		s.Base, start = b.baseAt, b.baseIdx
+	}
+	for _, sr := range b.sess[start:] {
+		s.Ledger.Add(sr.model, sr.tok, sr.fast)
+	}
+	s.Exact = b.hasBase && start == len(b.sess)
+	return s
+}
+
+// UsageSince prices this transcript's requests that started after t. A
+// fork's usage is added to its parent's session this way: whatever ran
+// before the parent's cost-state is already inside that total.
+func (b *Builder) UsageSince(t time.Time) usage.Ledger {
+	var l usage.Ledger
+	for _, sr := range b.sess {
+		if t.IsZero() || sr.first.After(t) {
+			l.Add(sr.model, sr.tok, sr.fast)
+		}
+	}
+	return l
 }
 
 // kilo abbreviates a token count for a row label: 542963 -> 542k.
@@ -526,12 +818,23 @@ func (b *Builder) rebuild() {
 			}})
 			continue
 		}
-		for _, tc := range rq.Tools {
-			rows = append(rows, Row{Action: &Action{
+		for i, tc := range rq.Tools {
+			// The narration is often the first thing the model does, and is on
+			// screen in Claude Code before the call is. Dropping it made the
+			// panel look like it had missed an action.
+			say := ""
+			if i == 0 {
+				say = rq.Say
+			}
+			a := &Action{
 				Time: tc.At, Model: record.ShortModel(rq.Model), Effort: rq.Effort,
 				Tool: tc.Name, Desc: tc.Desc, Thinking: rq.Thinking,
-				Failed: b.failed[tc.ID], Out: rq.Out, ToolID: tc.ID,
-			}})
+				Failed: b.failed[tc.ID], Out: rq.Out, ToolID: tc.ID, Say: say,
+			}
+			if tc.Skill != "" {
+				b.seatSkill(a, tc)
+			}
+			rows = append(rows, Row{Action: a})
 		}
 	}
 
@@ -579,9 +882,11 @@ func (b *Builder) rebuild() {
 			}
 		}
 		if at < 0 {
+			// Changes count too: a prompt sent while the fork ran must land
+			// below it, not above.
 			at = len(rows)
 			for i, r := range rows {
-				if r.Action != nil && r.Action.Time.After(f.At) {
+				if rowTime(r).After(f.At) {
 					at = i
 					break
 				}
@@ -589,6 +894,12 @@ func (b *Builder) rebuild() {
 		}
 		rows = append(rows[:at:at], append([]Row{{Fork: f}}, rows[at:]...)...)
 	}
+
+	var led usage.Ledger
+	for _, rq := range b.reqs {
+		led.Add(rq.Model, rq.Tok, rq.Fast)
+	}
+	t.Usage = led
 
 	b.lastKey = prev
 	t.Rows, t.Requests, t.OutTokens, t.CacheWrite, t.PeakCtx = rows, len(b.reqs), out, cw, peak
@@ -598,7 +909,7 @@ func (b *Builder) rebuild() {
 			t.End = last.Last
 			// Fork transcripts carry no system/turn_duration record, so
 			// end_turn on the final request is the only completion signal.
-			if last.Stop == "end_turn" {
+			if last.Stop == "end_turn" && !b.waiting() {
 				t.Complete = true
 			}
 		}
@@ -609,6 +920,18 @@ func (b *Builder) rebuild() {
 			t.Duration = t.End.Sub(t.Start)
 		}
 	}
+}
+
+func rowTime(r Row) time.Time {
+	switch {
+	case r.Action != nil:
+		return r.Action.Time
+	case r.Change != nil:
+		return r.Change.Time
+	case r.Fork != nil:
+		return r.Fork.At
+	}
+	return time.Time{}
 }
 
 func changeFor(prev, next stateKey, rq *request) *Change {

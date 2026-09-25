@@ -46,7 +46,18 @@ release's checksums, and puts it in `~/.local/bin` — nothing to build, no
 `sudo`. Set `CCXRAY_INSTALL_DIR` to put it elsewhere, or `CCXRAY_VERSION=vX.Y.Z`
 to pin a release. To uninstall, delete the binary.
 
-With Go instead: `go install github.com/dontfeedthecode/cc-xray/cmd/ccxray@latest`.
+If `ccxray` then isn't found, `~/.local/bin` isn't on your `PATH` (the
+installer says so and prints the line for your shell). For zsh, the macOS
+default:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+Use `~/.bashrc` for bash, or `fish_add_path ~/.local/bin` for fish.
+
+With Go instead: `go install github.com/dontfeedthecode/cc-xray/cmd/ccxray@latest`
+(it lands in `$(go env GOPATH)/bin`, which also needs to be on your `PATH`).
 Or grab a binary from [Releases](https://github.com/dontfeedthecode/cc-xray/releases).
 
 ## Use
@@ -60,13 +71,18 @@ ccxray
 It starts empty and attaches to the first session Claude Code writes after
 launch — start ccxray, then send your prompt — and keeps up when you `/clear`.
 Earlier runs are never replayed; use `--session <id>` for one of those.
-Running from a subdirectory is fine — it watches the parents up to the project.
+It watches the directory it starts in and every parent up to `$HOME`, never
+subdirectories: start it where Claude Code runs, or deeper, not above it.
+Editors like Zed and VS Code open terminals at the workspace root, so if
+Claude Code runs in a subfolder of your workspace, `cd` there first, or pass
+`--project <dir>`.
 
 | | |
 |---|---|
 | `↑` `↓` `k` `j` | scroll a line |
 | `pgup` `pgdn` | scroll a page |
 | `g` / `G` | jump to the top / follow the live edge |
+| `u` | show or hide the usage breakdown by model |
 | `c` | clear the panel and wait for the next session to write |
 | `q` | quit |
 
@@ -92,11 +108,32 @@ the table on one time axis, with the peak that ran at once. Nothing in the
 transcript says forks ran in parallel; overlapping spans are the only
 evidence, so that is what the lanes measure.
 
+**A skill that asked for an effort or model it didn't get** is flagged under
+its call. Claude Code drops these silently. A `model:` is skipped in auto
+mode when auto mode doesn't support it, or when an allowlist excludes it. And,
+undocumented, a skill the model calls itself applies its `effort:` only some
+of the time; one you invoke as `/name` has applied it every time. ccxray reads the skill's `SKILL.md` as it is
+now, so an edit made after the run can make the flag name the wrong value.
+
 **Δt per action**, so a 20-second step is obvious. **Failures** `×`,
-**thinking** `✎`.
+**thinking** `✎`. The model's words before a call sit faintly beneath it.
+
+**Cost, for the turn and the session.** The footer prices the turn (forks
+included) and the session so far; `u` breaks both down by model into input,
+output, cache reads and cache writes, as `/usage` does. Claude Code only
+writes its own total when you leave a session, so a live session's figure is
+priced by ccxray from the transcript and marked `~`: it runs a few percent
+under `/usage`, which also counts calls Claude Code never writes to the
+transcript, such as title generation. Once Claude Code's total is there it
+is used as is. Prices are API rates; on a subscription they show what the
+tokens would cost, not what you are billed.
 
 A turn ends when you type the next prompt and nothing else — a background
-agent reporting back mid-turn does not start a new one.
+agent reporting back mid-turn does not start a new one. The exception is a
+skill forked into the background: while it runs, anything you type joins
+the turn that launched it, drawn inline as `▎ your prompt`, so the fork
+keeps streaming in place and its return (`▸ returned`) and the model's
+answer to it land where you can see them.
 
 ## Requirements
 
