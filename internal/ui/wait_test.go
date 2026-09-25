@@ -111,6 +111,10 @@ func TestClearWaitsForTheNextWrite(t *testing.T) {
 	f, _ := os.OpenFile(live, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.Write([]byte("\n"))
 	f.Close()
+	// Linux stamps mtimes from a coarse clock that can trail time.Now(), so
+	// a write straight after the clear may not read as after it.
+	later := time.Now().Add(time.Second)
+	os.Chtimes(live, later, later)
 	m.poll()
 	if m.tl == nil || m.tl.Path() != live {
 		t.Error("did not reattach once the session was written again")
