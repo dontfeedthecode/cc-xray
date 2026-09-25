@@ -9,11 +9,17 @@ import (
 	"time"
 )
 
-// Slug maps a working directory to its transcript folder name. Both '/' and
-// '.' become '-', so /home/you/.config -> -home-you--config.
+// Slug maps a working directory to its transcript folder name. As in Claude
+// Code, every byte that is not an ASCII letter or digit becomes '-', so
+// /home/you/.config -> -home-you--config and "Local Sites" -> Local-Sites.
 func Slug(cwd string) string {
-	r := strings.NewReplacer("/", "-", ".", "-")
-	return r.Replace(cwd)
+	b := []byte(cwd)
+	for i, c := range b {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			b[i] = '-'
+		}
+	}
+	return string(b)
 }
 
 func Root() string {
@@ -91,6 +97,29 @@ func FirstSince(dirs []string, since time.Time) (dir, path string) {
 		}
 	}
 	return "", ""
+}
+
+// NewestAcross returns the most recently modified transcript in any of dirs,
+// and the dir holding it. Unlike FirstSince it does not prefer the most
+// specific dir: once attached, a session started from a parent directory — a
+// second terminal opened at the editor's workspace root, say — must still be
+// able to take over from one that has gone quiet.
+func NewestAcross(dirs []string) (dir, path string) {
+	var best int64
+	for _, d := range dirs {
+		p, err := Newest(d)
+		if err != nil || p == "" {
+			continue
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if mod := fi.ModTime().UnixNano(); path == "" || mod > best {
+			dir, path, best = d, p, mod
+		}
+	}
+	return dir, path
 }
 
 // SubagentDir returns the folder holding forked-skill transcripts for a

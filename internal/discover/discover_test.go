@@ -13,6 +13,8 @@ func TestSlug(t *testing.T) {
 		{"/home/you/project", "-home-you-project"},
 		{"/home/you/.config", "-home-you--config"}, // '.' also becomes '-'
 		{"/home/you/project/tool", "-home-you-project-tool"},
+		{"/Users/you/Local Sites/app/public", "-Users-you-Local-Sites-app-public"}, // and spaces
+		{"/home/you/my_app (v2)", "-home-you-my-app--v2-"},
 	} {
 		if got := Slug(c.in); got != c.want {
 			t.Errorf("Slug(%q) = %q, want %q", c.in, got, c.want)
