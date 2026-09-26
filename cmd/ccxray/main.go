@@ -37,6 +37,7 @@ func main() {
 	var (
 		project = flag.String("project", "", "working directory of the Claude Code session (default: cwd)")
 		session = flag.String("session", "", "session id to follow (default: most recent)")
+		all     = flag.Bool("all", false, "follow the next session written in any project, wherever ccxray starts")
 		ascii   = flag.Bool("ascii", false, "ASCII-only glyphs, for terminals that widen ambiguous runes")
 		showVer = flag.Bool("version", false, "print version and exit")
 	)
@@ -45,6 +46,10 @@ func main() {
 	if *showVer {
 		fmt.Printf("ccxray %s (%s)\n", buildVersion(), commit)
 		return
+	}
+	if *all && *session != "" {
+		fmt.Fprintln(os.Stderr, "--all and --session cannot be used together: --session follows one session only")
+		os.Exit(2)
 	}
 
 	cwd := *project
@@ -67,10 +72,11 @@ func main() {
 	}
 
 	// Without --session the panel starts empty and attaches to the first
-	// session written after launch, in this directory or any parent, rather
-	// than replaying whatever ran last.
+	// session written after launch, in this directory or any parent (or,
+	// with --all, any project at all), rather than replaying whatever ran
+	// last.
 	m := ui.NewModel(ui.Options{
-		Dir: dir, Path: path, ASCII: *ascii,
+		Dir: dir, Path: path, ASCII: *ascii, All: *all,
 		Watch: discover.Candidates(cwd), Since: time.Now(), CWD: cwd,
 	})
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {

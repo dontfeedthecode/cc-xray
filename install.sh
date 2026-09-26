@@ -20,7 +20,11 @@ case "$arch" in
 esac
 case "$os" in
   darwin|linux) ;;
-  *) fail "unsupported OS: $os (macOS and Linux only)" ;;
+  # Git Bash, and Claude Code's ! prefix on Windows, land here
+  mingw*|msys*|cygwin*) fail "on Windows, install from PowerShell instead:
+  irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex
+  or from here: powershell -c \"irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex\"" ;;
+  *) fail "unsupported OS: $os (macOS, Linux and Windows only)" ;;
 esac
 
 tag=${CCXRAY_VERSION:-}

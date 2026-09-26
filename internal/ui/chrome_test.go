@@ -106,6 +106,23 @@ func TestDefaultToolIsNotNamed(t *testing.T) {
 	t.Error("expected row not found")
 }
 
+// Claude Code on Windows runs shell commands through PowerShell as well as
+// Bash, and a turn mixes the two, so neither is named.
+func TestPowerShellIsNotNamed(t *testing.T) {
+	tn := &turn.Turn{Prompt: "p", Rows: []turn.Row{
+		{Action: &turn.Action{Model: "opus-5", Tool: "PowerShell", Desc: "List project slugs"}},
+		{Action: &turn.Action{Model: "opus-5", Tool: "Bash", Desc: "Show working tree status"}},
+		{Action: &turn.Action{Model: "opus-5", Tool: "Read", Desc: "main.go"}},
+	}}
+	body := stripANSI(RenderBody(tn, NewTheme(), UnicodeGlyphs(), Opts{Width: 92, Rows: 40}))
+	if strings.Contains(body, "PowerShell") || strings.Contains(body, "Bash") {
+		t.Errorf("a shell row was named:\n%s", body)
+	}
+	if !strings.Contains(body, "List project slugs") || !strings.Contains(body, "Read  main.go") {
+		t.Errorf("rows lost their descriptions:\n%s", body)
+	}
+}
+
 // A skill entered through the Skill tool draws one row, not the call followed
 // by a band repeating its name.
 func TestSkillCallAndBandAreOneRow(t *testing.T) {

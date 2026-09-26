@@ -4,6 +4,7 @@ package discover
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -75,11 +76,20 @@ func Candidates(cwd string) []string {
 		out = append(out, ProjectDir(dir))
 		parent := filepath.Dir(dir)
 		// stop at the filesystem root, and never climb above $HOME
-		if parent == dir || dir == home || parent == "." {
+		if parent == dir || samePath(dir, home) || parent == "." {
 			return out
 		}
 		dir = parent
 	}
+}
+
+// samePath compares two cleaned paths the way the filesystem does. Windows
+// ignores case, so --project c:\users\you\x must still stop at C:\Users\you.
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // FirstSince returns the newest transcript written after since, checking dirs
@@ -120,6 +130,37 @@ func NewestAcross(dirs []string) (dir, path string) {
 		}
 	}
 	return dir, path
+}
+
+// NewestSince returns the most recently written transcript in any of dirs, if
+// it was written after since. It is FirstSince with no dir preferred, for
+// --all, where the dirs are unrelated projects rather than one's parents.
+func NewestSince(dirs []string, since time.Time) (dir, path string) {
+	dir, path = NewestAcross(dirs)
+	if path == "" {
+		return "", ""
+	}
+	if fi, err := os.Stat(path); err != nil || !fi.ModTime().After(since) {
+		return "", ""
+	}
+	return dir, path
+}
+
+// All lists every project dir, for --all. Claude Code creates a project's
+// dir on its first prompt there, so the list is read afresh on each call.
+func All() []string {
+	root := Root()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, filepath.Join(root, e.Name()))
+		}
+	}
+	return out
 }
 
 // SubagentDir returns the folder holding forked-skill transcripts for a

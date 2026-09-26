@@ -27,6 +27,8 @@ type Model struct {
 	b       *turn.Builder
 	dir     string
 	watch   []string  // project dirs to wait on before any session is followed
+	all     bool      // --all: every project is watched, not just watch
+	scanned time.Time // when every project was last listed, under --all
 	since   time.Time // only a session written after this is picked up
 	cwd     string    // shown while waiting
 	pin     string    // --session: the only transcript ever followed
@@ -58,11 +60,13 @@ type forkWatch struct {
 
 // Options says what to follow. With Path set, that transcript is followed
 // from the start. Without it the panel starts empty and waits for the first
-// session in Watch written after Since, so a stale run is never shown.
+// session in Watch written after Since, so a stale run is never shown. All
+// widens Watch to every project Claude Code has a transcript folder for.
 type Options struct {
 	Dir   string
 	Path  string
 	Watch []string
+	All   bool
 	Since time.Time
 	CWD   string
 	ASCII bool
@@ -82,7 +86,7 @@ func NewModel(o Options) Model {
 	}
 	return Model{
 		th: NewTheme(), g: g, dir: o.Dir,
-		watch: o.Watch, since: o.Since, cwd: o.CWD,
+		watch: o.Watch, all: o.All, since: o.Since, cwd: o.CWD,
 		pin: pinned(o),
 		tl:  tl, b: turn.New(),
 		forks: map[string]*forkWatch{}, skills: &skill.Reader{},
@@ -236,6 +240,38 @@ func max(a, b int) int {
 // before a different one may replace it.
 const sessionQuiet = 20 * time.Second
 
+// allScanEvery spaces out the searches under --all, which list every project
+// Claude Code has run in rather than one directory and its parents. That
+// took 7ms for 55 projects when measured, too much to repeat on every tick.
+const allScanEvery = time.Second
+
+// scanDue reports whether it is time to search for a session. It always is,
+// except under --all, where it is at most once per allScanEvery; the cost is
+// up to a second's delay before the panel attaches or switches.
+func (m *Model) scanDue() bool {
+	if !m.all {
+		return true
+	}
+	if time.Since(m.scanned) < allScanEvery {
+		return false
+	}
+	m.scanned = time.Now()
+	return true
+}
+
+// watchDirs is where a replacement session may come from: every project
+// under --all, otherwise the dirs given at launch, or failing those the one
+// attached to.
+func (m *Model) watchDirs() []string {
+	switch {
+	case m.all:
+		return discover.All()
+	case len(m.watch) > 0:
+		return m.watch
+	}
+	return []string{m.dir}
+}
+
 // poll drains any appended lines, re-detecting the session if a newer one
 // appears (a /clear or a new session in the same project).
 //
@@ -254,20 +290,26 @@ func (m *Model) poll() {
 		m.tl = tail.New(m.pin)
 	}
 	if m.tl == nil {
-		dir, p := discover.FirstSince(m.watch, m.since)
+		if !m.scanDue() {
+			return
+		}
+		var dir, p string
+		if m.all {
+			dir, p = discover.NewestSince(discover.All(), m.since)
+		} else {
+			dir, p = discover.FirstSince(m.watch, m.since)
+		}
 		if p == "" {
 			return // still waiting for Claude Code to start a session
 		}
 		m.dir, m.tl = dir, tail.New(p)
 	}
+	// Only a quiet session may be replaced, so that is checked first: it is
+	// one stat, where finding the newest session lists every watched dir.
 	if m.dir != "" {
-		watch := m.watch
-		if len(watch) == 0 {
-			watch = []string{m.dir}
-		}
-		if dir, p := discover.NewestAcross(watch); p != "" && p != m.tl.Path() {
-			fi, err := os.Stat(m.tl.Path())
-			if err != nil || time.Since(fi.ModTime()) > sessionQuiet {
+		fi, err := os.Stat(m.tl.Path())
+		if (err != nil || time.Since(fi.ModTime()) > sessionQuiet) && m.scanDue() {
+			if dir, p := discover.NewestAcross(m.watchDirs()); p != "" && p != m.tl.Path() {
 				m.dir = dir
 				m.tl.Reset(p)
 				m.b = turn.New()
@@ -384,7 +426,11 @@ func (m Model) View() string {
 	if m.tl == nil {
 		// the help line sits where it does once a turn is showing
 		h := max(1, m.height-1)
-		return RenderWaiting(m.th, m.g, m.width, h, m.frame, m.cwd) + "\n" +
+		where := tildePath(m.cwd)
+		if m.all {
+			where = "any project"
+		}
+		return RenderWaiting(m.th, m.g, m.width, h, m.frame, where) + "\n" +
 			m.th.Faint.Render("  "+m.help.View(m.keys))
 	}
 	if m.err != nil {
