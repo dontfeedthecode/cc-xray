@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,8 +10,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// transcript calls a skill in dir whose first request runs at effort.
+// transcript calls a skill in dir whose first request runs at effort. The dir
+// is JSON-escaped first: a Windows path's backslashes are not valid escapes.
 func skillTranscript(dir, effort string) string {
+	q, _ := json.Marshal(dir)
+	dir = string(q[1 : len(q)-1])
 	return `{"type":"user","uuid":"u1","timestamp":"2026-01-02T10:00:00.000Z","message":{"role":"user","content":"audit the site"}}
 {"type":"assistant","uuid":"a1","requestId":"r1","timestamp":"2026-01-02T10:00:02.000Z","effort":"medium","message":{"model":"claude-opus-5-5","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"lighthouse"}}]}}
 {"type":"user","uuid":"u3","isMeta":true,"sourceToolUseID":"t1","timestamp":"2026-01-02T10:00:02.100Z","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: ` + dir + `\n\nRun it."}]}}

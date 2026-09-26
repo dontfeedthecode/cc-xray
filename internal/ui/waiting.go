@@ -9,15 +9,16 @@ import (
 )
 
 // RenderWaiting draws the empty state shown before any session is followed,
-// centred in a width×height area. Each line is styled on its own: styling a
-// multi-line string pads it to its widest line, which pushed text sideways.
-func RenderWaiting(th Theme, g Glyphs, width, height, frame int, cwd string) string {
+// centred in a width×height area, with where it is watching beneath the
+// heading. Each line is styled on its own: styling a multi-line string pads
+// it to its widest line, which pushed text sideways.
+func RenderWaiting(th Theme, g Glyphs, width, height, frame int, where string) string {
 	lines := []string{
 		th.Live.Render(builtinSpin(g, frame)) + "  " +
 			th.Text.Render("Waiting for a Claude Code session"),
 	}
-	if cwd != "" {
-		lines = append(lines, "   "+th.Dim.Render(tildePath(cwd)))
+	if where != "" {
+		lines = append(lines, "   "+th.Dim.Render(where))
 	}
 	lines = append(lines, "",
 		"   "+th.Dimmer.Render("Send a prompt in Claude Code and it will appear here."))

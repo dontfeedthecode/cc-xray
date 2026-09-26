@@ -140,12 +140,55 @@ func TestClearKeepsAPinnedSession(t *testing.T) {
 	}
 }
 
+// --all is for starting ccxray somewhere unrelated to the project Claude Code
+// runs in: it must attach to a session in any project, including one whose
+// dir only appears after launch, and say so while it waits.
+func TestAllAttachesToASessionInAnyProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	root := filepath.Join(home, ".claude", "projects")
+	src, err := os.ReadFile("testdata/session.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(root, "C--work-old", "stale.jsonl")
+	os.MkdirAll(filepath.Dir(stale), 0o755)
+	os.WriteFile(stale, src, 0o644)
+	hour := time.Now().Add(-time.Hour)
+	os.Chtimes(stale, hour, hour)
+
+	m := NewModel(Options{All: true, Watch: []string{t.TempDir()}, Since: time.Now().Add(-time.Second), CWD: home})
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 92, Height: 40})
+	m = mm.(Model)
+	m.poll()
+	if v := stripANSI(m.View()); !strings.Contains(v, "any project") || m.tl != nil {
+		t.Fatalf("want to be waiting on any project:\n%s", v)
+	}
+
+	live := filepath.Join(root, "C--elsewhere-new", "live.jsonl")
+	os.MkdirAll(filepath.Dir(live), 0o755)
+	os.WriteFile(live, src, 0o644)
+	m.poll()
+	if m.tl != nil {
+		t.Fatal("searched again within a second of the last search")
+	}
+	m.scanned = time.Time{}
+	m.poll()
+	if m.tl == nil || m.tl.Path() != live {
+		t.Fatalf("did not attach to the session in a project created after launch")
+	}
+}
+
 // The waiting screen once rendered its path far to the right: lipgloss padded
 // the styled heading to full width before the path was appended. Every line
 // of the block must share one left edge, and the block must be centred.
 func TestWaitingScreenIsAlignedAndCentred(t *testing.T) {
-	t.Setenv("HOME", "/Users/you")
-	v := stripANSI(RenderWaiting(NewTheme(), UnicodeGlyphs(), 100, 21, 0, "/Users/you/work/proj"))
+	home := filepath.FromSlash("/Users/you")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // what os.UserHomeDir reads on Windows
+	tilde := "~" + string(filepath.Separator) + filepath.Join("work", "proj")
+	v := stripANSI(RenderWaiting(NewTheme(), UnicodeGlyphs(), 100, 21, 0, tildePath(filepath.Join(home, "work", "proj"))))
 	lines := strings.Split(v, "\n")
 	if len(lines) != 21 {
 		t.Fatalf("got %d lines, want the full 21-line area", len(lines))
@@ -155,7 +198,7 @@ func TestWaitingScreenIsAlignedAndCentred(t *testing.T) {
 		switch {
 		case strings.Contains(ln, "Waiting for a Claude Code session"):
 			head = i
-		case strings.Contains(ln, "~/work/proj"):
+		case strings.Contains(ln, tilde):
 			path = i
 		case strings.Contains(ln, "Send a prompt"):
 			hint = i

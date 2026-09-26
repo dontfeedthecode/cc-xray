@@ -8,13 +8,17 @@ builds:
   - main: ./cmd/ccxray
     binary: ccxray
     env: [CGO_ENABLED=0]
-    goos: [darwin, linux]
+    goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
 archives:
   - formats: [tar.gz]
+    # zip on Windows: Explorer opens it, and install.ps1's Expand-Archive reads only zip.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
@@ -29,6 +33,11 @@ changelog:
 release:
   footer: |
     ## Install
+    macOS and Linux:
     ```sh
     curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh
+    ```
+    Windows (PowerShell):
+    ```powershell
+    irm https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.ps1 | iex
     ```

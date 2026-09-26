@@ -982,7 +982,7 @@ func describe(name string, raw json.RawMessage) string {
 	}
 
 	switch name {
-	case "Bash":
+	case "Bash", "PowerShell":
 		if d := str("description"); d != "" {
 			return d
 		}
@@ -1063,11 +1063,13 @@ func firstLine(s string) string {
 	return s
 }
 
+// base is the last element of a path. Windows transcripts carry backslash
+// paths, so either separator counts whatever ccxray itself was built for.
 func base(p string) string {
 	if p == "" {
 		return ""
 	}
-	if i := strings.LastIndexByte(p, '/'); i >= 0 && i < len(p)-1 {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 && i < len(p)-1 {
 		return p[i+1:]
 	}
 	return p

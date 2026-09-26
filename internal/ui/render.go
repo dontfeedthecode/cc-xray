@@ -255,10 +255,12 @@ func RenderBody(t *turn.Turn, th Theme, g Glyphs, o Opts) string {
 	return b.String()
 }
 
-// DefaultTool is assumed and never named on a row. Nearly every action in a
-// normal turn is a shell command, so printing "Bash" on line after line said
-// nothing and cost the description eight columns. Anything else is announced.
-const DefaultTool = "Bash"
+// isDefaultTool reports a tool that is assumed and never named on a row.
+// Nearly every action in a normal turn is a shell command, so printing "Bash"
+// on line after line said nothing and cost the description eight columns.
+// Claude Code on Windows has a PowerShell tool beside Bash, and a turn mixes
+// the two freely, so both count. Anything else is announced.
+func isDefaultTool(name string) bool { return name == "Bash" || name == "PowerShell" }
 
 func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 	gut, gutStyle := "  ", th.Faint
@@ -267,7 +269,7 @@ func renderAction(a *turn.Action, th Theme, g Glyphs, o Opts, l layout) string {
 	}
 	toolStyle, descStyle := th.Tool, th.Dim
 	tool, desc := shortTool(a.Tool), a.Desc
-	if a.Tool == DefaultTool {
+	if isDefaultTool(a.Tool) {
 		tool = ""
 	}
 
@@ -464,7 +466,7 @@ func renderFork(f *turn.Fork, th Theme, g Glyphs, width int, l layout) string {
 				gut = g.Think
 			}
 			tool := shortTool(a.Tool)
-			if a.Tool == DefaultTool {
+			if isDefaultTool(a.Tool) {
 				tool = ""
 			}
 			// the indent and rail cost seven cells against a top-level row

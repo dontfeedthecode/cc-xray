@@ -1,16 +1,45 @@
 ---
 name: ccxray-demo
-description: Drive one turn that exercises every row ccxray can draw — plain tool calls, several named tools, a deliberate failure, a forked skill and a model change. Use when the user asks to demo, smoke-test or kitchen-sink ccxray, or to see what the panel looks like under load.
+description: Drive one turn that exercises every row ccxray can draw — plain tool calls, several named tools, a deliberate failure, a forked skill and a model change — after checking ccxray is installed and running, and installing it from this checkout if not. Use when the user asks to demo, smoke-test or kitchen-sink ccxray, to see what the panel looks like under load, or to get ccxray set up to try it.
 argument-hint: ""
-allowed-tools: Bash, Read, Grep, Glob, Write, Skill
+allowed-tools: Bash, Read, Grep, Glob, Write, Skill, AskUserQuestion
 ---
 
 A kitchen-sink turn for the panel running beside this one. Every step below
 exists to put a different kind of row on screen, so run them **in order, as
-one turn**, and do not stop to ask for confirmation — the user asked for the
-whole sequence when they invoked this skill.
+one turn**. Apart from the preflight in step 0, do not stop to ask for
+confirmation — the user asked for the whole sequence when they invoked this
+skill.
 
 Keep each step small. The point is the shape of the turn, not the output.
+
+Run every shell block with the `Bash` tool, on Windows too, where it is Git
+Bash: they are POSIX shell, and PowerShell would reject most of them.
+
+## 0 — preflight
+
+Before anything else, check that ccxray is running and that this session can
+run Go, which the later steps need:
+
+```sh
+sh .claude/skills/ccxray-demo/preflight.sh
+```
+
+Describe it as "Check ccxray is running". Its first line says what to do:
+
+- `ready` — carry on with step 1.
+- `start` — ccxray is not running. If the output says it was installed, say
+  so in one line. Show the user the start command it printed, in a code
+  block of its own (a `powershell` block on Windows, `sh` elsewhere), plus
+  the `--all` line as the way to start it from any folder. Then ask with
+  `AskUserQuestion` whether ccxray is running, with the options "It's running"
+  and "Stop the demo". On "It's running", carry on with step 1 in this same
+  turn: the panel attaches at the next write and draws the whole turn,
+  preflight included. On "Stop the demo", stop.
+- `restart` or `no-go` — relay the rest of the output in a few plain
+  sentences and stop. The demo cannot work until Claude Code can find Go,
+  and a running process cannot pick up a PATH changed after it started.
+- `error`, or anything else — show the output and stop.
 
 ## 1 — plain shell calls
 

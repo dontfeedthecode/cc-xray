@@ -13,8 +13,12 @@ func TestDescribeCoversRealTools(t *testing.T) {
 	}{
 		{"Bash", `{"description":"Audit packaging readiness"}`, "Audit packaging readiness"},
 		{"Bash", `{"command":"go test ./...\nmore"}`, "go test ./..."},
+		{"PowerShell", `{"description":"List project slugs","command":"Get-ChildItem"}`, "List project slugs"},
+		{"PowerShell", `{"command":"go version"}`, "go version"},
 		{"Write", `{"file_path":"/Users/x/ccxray/internal/ui/render.go"}`, "render.go"},
 		{"Read", `{"file_path":"/a/b/SKILL.md"}`, "SKILL.md"},
+		{"Read", `{"file_path":"C:\\Users\\you\\proj\\main.go"}`, "main.go"}, // Windows
+		{"Grep", `{"pattern":"TODO","path":"C:\\Users\\you\\proj\\internal"}`, "TODO  in internal"},
 		{"Grep", `{"pattern":"attributionSkill","path":"/a/internal"}`, "attributionSkill  in internal"},
 		{"Skill", `{"skill":"lighthouse-audit","args":"http://x"}`, "lighthouse-audit  http://x"},
 		{"Agent", `{"subagent_type":"claude-code-guide"}`, "claude-code-guide"},

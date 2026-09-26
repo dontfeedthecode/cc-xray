@@ -1,4 +1,4 @@
-# ccxray
+# X-ray for Claude Code
 
 Watch a Claude Code turn as it happens, in a terminal tab beside it.
 
@@ -24,41 +24,50 @@ invisible — the moment a skill changes the model or effort out from under you.
   turn complete   15 req  ·  63k ctx                               6,080  1m 48s
 ```
 
-Most actions are shell commands, so `Bash` is the assumed default and goes
-unnamed — the description is the useful part and gets the space. Anything
-else announces itself: `Read`, `Grep`, `Skill`, an MCP tool. `✎` marks a row
-the model thought before, `×` marks a call that failed.
+Most actions are shell commands, so `Bash` (and `PowerShell` on Windows) is
+the assumed default and goes unnamed — the description is the useful part and
+gets the space. Anything else announces itself: `Read`, `Grep`, `Skill`, an
+MCP tool. `✎` marks a row the model thought before, `×` marks a call that
+failed.
 
 It is **read-only**. It tails the transcript Claude Code already writes and
-never modifies anything.
+never modifies anything. It runs on macOS, Linux and Windows.
 
 ## Install
+
+**macOS and Linux**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh
 ```
 
-Or from inside Claude Code, prefix it with `!` to run it in place:
-`! curl -fsSL https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.sh | sh`
+**Windows** (in PowerShell)
 
-It downloads a prebuilt binary for your platform, checks it against the
-release's checksums, and puts it in `~/.local/bin` — nothing to build, no
-`sudo`. Set `CCXRAY_INSTALL_DIR` to put it elsewhere, or `CCXRAY_VERSION=vX.Y.Z`
-to pin a release. To uninstall, delete the binary.
-
-If `ccxray` then isn't found, `~/.local/bin` isn't on your `PATH` (the
-installer says so and prints the line for your shell). For zsh, the macOS
-default:
-
-```sh
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```powershell
+irm https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.ps1 | iex
 ```
 
-Use `~/.bashrc` for bash, or `fish_add_path ~/.local/bin` for fish.
+Either one downloads the prebuilt binary for your machine (`amd64` or
+`arm64`), checks it against the release's checksums, and puts it in
+`~/.local/bin` (`~\.local\bin` on Windows). There is nothing to build and
+no `sudo` or admin prompt. Then run `ccxray`, in a new terminal on Windows.
 
-With Go instead: `go install github.com/dontfeedthecode/cc-xray/cmd/ccxray@latest`
-(it lands in `$(go env GOPATH)/bin`, which also needs to be on your `PATH`).
-Or grab a binary from [Releases](https://github.com/dontfeedthecode/cc-xray/releases).
+- **`ccxray` not found?** On macOS and Linux, the installer doesn't edit your
+  shell profile. If `~/.local/bin` isn't on your `PATH`, it prints the line
+  to add; for zsh, the macOS default, that is
+  `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc`.
+  On Windows, the installer adds the folder to your user `PATH` itself, and
+  only terminals opened afterwards see the change.
+- **From inside Claude Code,** put `!` in front to run the command in place.
+  On Windows `!` runs Git Bash, so wrap the PowerShell line:
+  `! powershell -c "irm https://raw.githubusercontent.com/dontfeedthecode/cc-xray/main/install.ps1 | iex"`
+- **Options:** `CCXRAY_INSTALL_DIR` installs somewhere else, and
+  `CCXRAY_VERSION=vX.Y.Z` pins a release. In PowerShell, set them first, as
+  in `$env:CCXRAY_VERSION = 'vX.Y.Z'`.
+- **With Go:** `go install github.com/dontfeedthecode/cc-xray/cmd/ccxray@latest`
+  puts it in `$(go env GOPATH)/bin`. Binaries for every platform are also on
+  the [Releases](https://github.com/dontfeedthecode/cc-xray/releases) page.
+- **Uninstall** by deleting the binary.
 
 ## Use
 
@@ -77,6 +86,12 @@ Editors like Zed and VS Code open terminals at the workspace root, so if
 Claude Code runs in a subfolder of your workspace, `cd` there first, or pass
 `--project <dir>`.
 
+To start it from anywhere, pass `--all`: it then attaches to the first
+session written after launch in any project. The directory rule exists so
+that a second Claude Code window in another project can't take the panel
+over; with `--all` it can, once the session being followed has been quiet
+for 20 seconds.
+
 | | |
 |---|---|
 | `↑` `↓` `k` `j` | scroll a line |
@@ -91,6 +106,7 @@ incoming rows don't yank the view away, and `G` resumes.
 
 ```
 ccxray --project <dir>     # a directory other than the current one
+ccxray --all               # any project, wherever ccxray was started
 ccxray --session <id>      # pin to one existing session instead of waiting
 ccxray --ascii             # plain glyphs for terminals that widen box-drawing
 ```
@@ -138,7 +154,10 @@ answer to it land where you can see them.
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) (validated against `2.1.278`)
-- macOS or Linux, `amd64` or `arm64`
+- macOS, Linux or Windows, `amd64` or `arm64`
+
+On Windows, use Windows Terminal (the default on Windows 11). If an older
+console window draws boxes where the glyphs should be, run with `--ascii`.
 
 The transcript format is internal to Claude Code and changes between
 versions, so `ccxray` parses defensively: unknown fields are ignored, a bad
@@ -147,9 +166,10 @@ line is skipped rather than fatal, and a version mismatch shows a notice.
 ## How it works
 
 Claude Code writes every session to
-`~/.claude/projects/<slugged-cwd>/<session-id>.jsonl`, appending as the turn
-runs. `ccxray` tails that file, tracking a byte offset so it only parses what
-is new, and rebuilds the turn from it.
+`~/.claude/projects/<slugged-cwd>/<session-id>.jsonl` (under
+`%USERPROFILE%` on Windows, where `C:\work\app` slugs to `C--work-app`),
+appending as the turn runs. `ccxray` tails that file, tracking a byte offset
+so it only parses what is new, and rebuilds the turn from it.
 
 Forked skills live in a `subagents/` directory beside the session file, named
 by an `agentId` the parent transcript carries, so the correlation is exact.
@@ -185,11 +205,21 @@ dropped — the reason the footer's context figure just collapsed.
 ## Trying it out
 
 A real turn is whatever you happen to be doing, so the repo ships a skill
-that drives a deliberately varied one. Open two tabs in this directory: in the
-first `go run ./cmd/ccxray`, in the second start Claude Code and run
-`/ccxray-demo`. It works through plain shell calls, several named tools, a
-deliberate failure, and two skills that move the model and effort out from
-under the turn.
+that drives a deliberately varied one. Start Claude Code in this directory
+and run `/ccxray-demo`. It works through plain shell calls, several named
+tools, a deliberate failure, and two skills that move the model and effort
+out from under the turn.
+
+It needs [Go](https://go.dev/dl/) (on Windows, `winget install GoLang.Go`),
+and it sets up the rest itself. It first checks that ccxray is running. If
+it isn't, the skill installs it from this checkout with `go install` when no
+`ccxray` is found, prints the command to start it in a second terminal, and
+waits for you to say it's running. If Go was installed after Claude Code
+started, Claude Code's shell can't see it yet; the skill says so, and
+restarting Claude Code from a new terminal fixes it.
+
+To run the checkout without installing it, use `go run ./cmd/ccxray` from
+this directory.
 
 Those skills live in `.claude/skills/` here rather than `~/.claude/skills`, so
 they arrive with a clone. Claude Code loads them from the working directory at
